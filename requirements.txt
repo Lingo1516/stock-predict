@@ -1,5 +1,5 @@
-streamlit==1.28.2
-yfinance==0.2.18
-ta==0.10.2
-scikit-learn==1.3.0
-pandas==2.0.3
+streamlit
+yfinance
+ta
+scikit-learn
+pandas
