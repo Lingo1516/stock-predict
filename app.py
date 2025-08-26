@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 @st.cache_data
 def predict_next_5(stock):
     end   = datetime.today().date()
-    start = end - timedelta(days=250)
+    start = end - timedelta(days=400)
 
     # 下載資料
     df   = yf.download(stock, start=start, end=end + pd.Timedelta(days=1), interval="1d", auto_adjust=True)
@@ -59,3 +59,4 @@ if st.button("預測"):
         st.success(f"最後收盤：{last:.2f}")
         for d, p in forecast.items():
             st.write(f"{d}：{p:.2f}")
+
