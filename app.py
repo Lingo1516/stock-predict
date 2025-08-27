@@ -10,7 +10,14 @@ from datetime import datetime
 import time
 from ta.volatility import BollingerBands
 from ta.trend import ADXIndicator
-from statsmodels.tsa.arima.model import ARIMA  # 引入ARIMA模型
+
+# 如果 ARIMA 無法導入，則會顯示錯誤
+try:
+    from statsmodels.tsa.arima.model import ARIMA  # 引入ARIMA模型
+except ImportError as e:
+    st.error("ARIMA 模型庫導入失敗！請檢查是否安裝了 statsmodels 库。")
+    raise e
+
 from keras.models import Sequential
 from keras.layers import LSTM, Dense  # 引入LSTM模型
 from sklearn.preprocessing import MinMaxScaler  # 用於LSTM預處理
