@@ -68,34 +68,13 @@ def calculate_technical_indicators(df):
     # 新增 ROC (Rate of Change)
     df['ROC'] = df['Close'].diff(periods=12) / df['Close'].shift(periods=12) * 100
     
+    # === 新增三大法人相關指標（需外部數據支持） ===
+    df['institutional_net_buy_sell'] = np.nan 
+    df['institutional_5d_cum_net_buy_sell'] = np.nan
+    df['institutional_20d_cum_net_buy_sell'] = np.nan
+    df['institutional_10d_net_buy_sell_ma'] = np.nan
+    
     return df
-
-def generate_mock_institutional_data(df):
-    """
-    模擬生成三大法人買賣超數據。
-    在真實應用中，此處應替換為實際的數據爬取或API調用邏輯。
-    """
-    # 創建與主資料框索引相同的空DataFrame
-    institutional_data = pd.DataFrame(index=df.index)
-    
-    # 生成擬真的隨機買賣超數據
-    # 假設買賣超金額在 -5億 到 +5億 之間波動
-    np.random.seed(42) # 確保每次運行結果一致
-    institutional_data['net_buy_sell'] = np.random.uniform(-500_000_000, 500_000_000, len(df))
-    
-    # 計算累積買賣超
-    institutional_data['5d_cum'] = institutional_data['net_buy_sell'].rolling(window=5).sum()
-    institutional_data['20d_cum'] = institutional_data['net_buy_sell'].rolling(window=20).sum()
-    
-    # 計算移動平均
-    institutional_data['10d_ma'] = institutional_data['net_buy_sell'].rolling(window=10).mean()
-    
-    # 根據大盤漲跌與成交量，讓數據看起來更真實
-    # 假設大盤上漲時，法人買超機率較高
-    twii_change = df['TWII_Close'].pct_change()
-    institutional_data['net_buy_sell'] = institutional_data['net_buy_sell'] * (1 + twii_change.fillna(0) * 5)
-    
-    return institutional_data
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
@@ -143,8 +122,8 @@ def predict_next_5(stock, days, decay_factor):
         if isinstance(sp.columns, pd.MultiIndex):
             sp.columns = [col[0] for col in sp.columns]
 
-        if not all(col in df.columns for col in ['Close', 'High', 'Low', 'Volume']):
-            st.error("股票數據中缺少必要的欄位 (Close, High, Low, Volume)。")
+        if not all(col in df.columns for col in ['Close', 'High', 'Low', 'Volume', 'Open']):
+            st.error("股票數據中缺少必要的欄位 (Open, Close, High, Low, Volume)。")
             return None, None, None
 
         df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
@@ -152,10 +131,12 @@ def predict_next_5(stock, days, decay_factor):
 
         df = calculate_technical_indicators(df)
         
-        # 呼叫模擬數據生成器，並將結果與主資料框合併
-        institutional_data = generate_mock_institutional_data(df)
-        df = df.join(institutional_data, how='left')
-
+        # 新增三大法人買賣超欄位 (目前為空值，需手動匯入數據)
+        df['institutional_net_buy_sell'] = np.nan 
+        df['institutional_5d_cum_net_buy_sell'] = np.nan
+        df['institutional_20d_cum_net_buy_sell'] = np.nan
+        df['institutional_10d_net_buy_sell_ma'] = np.nan
+        
         df['Prev_Close'] = df['Close'].shift(1)
         for i in range(1, 4):
             df[f'Prev_Close_Lag{i}'] = df['Close'].shift(i)
@@ -171,8 +152,7 @@ def predict_next_5(stock, days, decay_factor):
             'Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
             'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
             'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA', 'ATR', 'ROC',
-            # 新增的籌碼面特徵
-            'net_buy_sell', '5d_cum', '20d_cum', '10d_ma'
+            'institutional_net_buy_sell', 'institutional_5d_cum_net_buy_sell', 'institutional_20d_cum_net_buy_sell', 'institutional_10d_net_buy_sell_ma'
         ] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
         missing_feats = [f for f in feats if f not in df.columns]
@@ -180,7 +160,6 @@ def predict_next_5(stock, days, decay_factor):
             st.error(f"缺少特徵: {missing_feats}")
             return None, None, None
 
-        # 修正後的資料清理方式：用前一個值填充空值，對於無法填充的空值設為0
         df_clean = df[feats + ['Close']].fillna(method='ffill').fillna(0)
         
         if len(df_clean) < 30:
@@ -272,7 +251,7 @@ def predict_next_5(stock, days, decay_factor):
                     new_features[volatility_idx] = (recent_volatility - X_mean[volatility_idx]) / X_std[volatility_idx]
                 
                 # 在此處為新的特徵賦予預測值 (目前暫時設為0)
-                institutional_idx = feats.index('net_buy_sell')
+                institutional_idx = feats.index('institutional_net_buy_sell')
                 new_features[institutional_idx] = 0
 
                 current_features = new_features.reshape(1, -1)
@@ -313,6 +292,44 @@ def get_trade_advice(last, preds):
     else:
         return f"持有 (預期變動 {change_percent:.1f}%)"
 
+def get_day_trading_advice(df):
+    """
+    提供基於當日數據的當沖建議。
+    此建議為模擬，不具備實時性，僅供參考。
+    """
+    if df is None or len(df) < 2:
+        return "資料不足，無法提供當沖建議"
+
+    today_data = df.iloc[-1]
+    yesterday_data = df.iloc[-2]
+    
+    # 判斷開盤價與昨日收盤價的關係
+    gap_pct = (today_data['Open'] - yesterday_data['Close']) / yesterday_data['Close'] * 100
+    
+    # 判斷盤中漲跌
+    intraday_change_pct = (today_data['Close'] - today_data['Open']) / today_data['Open'] * 100
+    
+    advice_text = ""
+    advice_type = "neutral"
+
+    if intraday_change_pct > 0.5 and today_data['Volume'] > yesterday_data['Volume'] * 1.5:
+        advice_text = f"盤中股價強勢上漲並伴隨大量，適合偏多當沖 ({intraday_change_pct:.2f}%)"
+        advice_type = "bullish"
+    elif intraday_change_pct < -0.5 and today_data['Volume'] > yesterday_data['Volume'] * 1.5:
+        advice_text = f"盤中股價弱勢下跌並伴隨大量，適合偏空當沖 ({intraday_change_pct:.2f}%)"
+        advice_type = "bearish"
+    elif intraday_change_pct > 0.2 and intraday_change_pct <= 0.5:
+        advice_text = f"盤中股價小幅上漲，觀望或輕倉偏多 ({intraday_change_pct:.2f}%)"
+        advice_type = "neutral_bullish"
+    elif intraday_change_pct < -0.2 and intraday_change_pct >= -0.5:
+        advice_text = f"盤中股價小幅下跌，觀望或輕倉偏空 ({intraday_change_pct:.2f}%)"
+        advice_type = "neutral_bearish"
+    else:
+        advice_text = "盤中波動不明顯，建議觀望"
+        advice_type = "neutral"
+        
+    return advice_text, advice_type
+
 
 st.set_page_config(page_title="股價預測系統", layout="centered", initial_sidebar_state="auto")
 st.title("📈 5 日股價預測系統")
@@ -338,6 +355,14 @@ if st.button("🔮 開始預測", type="primary"):
         full_code = f"{full_code}.TW"
     with st.spinner("正在下載資料並進行預測..."):
         last, forecast, preds = predict_next_5(full_code, days, decay_factor)
+        
+        # 再次下載數據以獲取當日開盤價等資訊
+        try:
+            df_day_trading = yf.download(full_code, start=datetime.today().date() - pd.Timedelta(days=2), end=datetime.today().date() + pd.Timedelta(days=1), interval="1d", auto_adjust=True)
+            day_trading_advice, advice_type = get_day_trading_advice(df_day_trading)
+        except Exception:
+            day_trading_advice = "無法提供當沖建議"
+            advice_type = "neutral"
 
     if last is None:
         st.error("❌ 預測失敗，請檢查股票代號或網路連線")
@@ -358,11 +383,20 @@ if st.button("🔮 開始預測", type="primary"):
             st.metric("當前股價", f"${last:.2f}")
             advice = get_trade_advice(last, preds)
             if "買入" in advice:
-                st.success(f"📈 **交易建議**: {advice}")
+                st.success(f"📈 **5 日交易建議**: {advice}")
             elif "賣出" in advice:
-                st.error(f"📉 **交易建議**: {advice}")
+                st.error(f"📉 **5 日交易建議**: {advice}")
             else:
-                st.warning(f"📊 **交易建議**: {advice}")
+                st.warning(f"📊 **5 日交易建議**: {advice}")
+            
+            # 顯示當沖建議
+            if advice_type == "bullish":
+                st.success(f"📈 **當沖建議**: {day_trading_advice}")
+            elif advice_type == "bearish":
+                st.error(f"📉 **當沖建議**: {day_trading_advice}")
+            else:
+                st.info(f"📊 **當沖建議**: {day_trading_advice}")
+
 
         with col2:
             st.subheader("📅 未來 5 日預測")
@@ -391,4 +425,4 @@ if st.button("🔮 開始預測", type="primary"):
         st.line_chart(chart_data.set_index('日期'))
 
 st.markdown("---")
-st.caption("⚠️ 此預測僅供參考，投資有風險，請謹慎決策")
+st.caption("⚠️ **風險提示**: 當沖建議基於簡化數據，不具備實時性，僅供參考，請謹慎決策。")
