@@ -77,12 +77,12 @@ def calculate_technical_indicators(df):
     return df
 
 @st.cache_data
-def predict_next_15(stock, history_days, forecast_days, decay_factor):
+def predict_next_15(stock, days_for_model, forecast_days, decay_factor):
     """
     下載股票數據，計算技術指標，並使用隨機森林模型預測未來15天的股價。
     Args:
         stock (str): 股票代號，例如 "2330.TW"。
-        history_days (int): 要下載的歷史天數。
+        days_for_model (int): 要下載的歷史天數。
         forecast_days (int): 要預測的天數。
         decay_factor (float): 權重衰減因子，用於強調近期數據的重要性。
     Returns:
@@ -90,9 +90,8 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
     """
     try:
         end = pd.Timestamp(datetime.today().date())
-        # 下載歷史數據天數調整為2倍歷史天數 + 預測天數，確保計算指標有足夠資料
-        # 新增邏輯：確保下載的歷史數據足夠計算所有指標，並用於圖表繪製
-        days_to_download = history_days + 30 # 下載更多天數以確保有足夠的數據計算指標
+        # 下載更多天數以確保有足夠的數據計算指標
+        days_to_download = days_for_model + 50 
         start = end - pd.Timedelta(days=days_to_download) 
         
         max_retries = 3
@@ -116,7 +115,7 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
                 st.error(f"無法下載資料：{stock}。請檢查股票代號或網路連線。")
                 return None, None, None, None
 
-        if df is None or len(df) < history_days_for_model + 30: # 確保有足夠的數據供模型訓練
+        if df is None or len(df) < days_for_model + 30: # 確保有足夠的數據供模型訓練
             st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據，無法進行預測。")
             return None, None, None, None
 
@@ -165,26 +164,30 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
             st.error(f"缺少特徵: {missing_feats}")
             return None, None, None, None
 
-        df_clean = df[feats + ['Close']].fillna(method='ffill').fillna(0)
+        df_clean = df[feats + ['Close']].dropna()
         
-        if len(df_clean) < 30:
+        if len(df_clean) < days_for_model:
             st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據，無法進行預測。")
             return None, None, None, None
 
         X = df_clean[feats].values
         y = df_clean['Close'].values
+        
+        # 截取訓練數據，確保與模式選擇的天數一致
+        X_train_model = X[-days_for_model:]
+        y_train_model = y[-days_for_model:]
 
-        X_mean = np.mean(X, axis=0)
-        X_std = np.std(X, axis=0)
+        X_mean = np.mean(X_train_model, axis=0)
+        X_std = np.std(X_train_model, axis=0)
         X_std[X_std == 0] = 1
 
-        X_normalized = (X - X_mean) / X_std
-        weights = np.exp(-decay_factor * np.arange(len(X))[::-1])
+        X_normalized = (X_train_model - X_mean) / X_std
+        weights = np.exp(-decay_factor * np.arange(len(X_train_model))[::-1])
         weights = weights / np.sum(weights)
 
         split_idx = int(len(X_normalized) * 0.8)
         X_train, X_val = X_normalized[:split_idx], X_normalized[split_idx:]
-        y_train, y_val = y[:split_idx], y[split_idx:]
+        y_train, y_val = y_train_model[:split_idx], y_train_model[split_idx:]
         train_weights = weights[:split_idx]
 
         models = []
@@ -199,7 +202,7 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
             models.append(('RF', rf_model))
 
         last_features = X_normalized[-1:].copy()
-        last_close = float(y[-1])
+        last_close = float(y_train_model[-1])
         predictions = {}
         # 預測未來 15 天
         future_dates = []
@@ -222,7 +225,7 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
             weights_ensemble = [0.5, 0.3, 0.2]
             ensemble_pred = np.average(day_predictions, weights=weights_ensemble)
             
-            historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])
+            historical_volatility = np.std(y_train_model[-30:]) / np.mean(y_train_model[-30:])
             volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.05)
             final_pred = ensemble_pred + volatility_adjustment
             
@@ -274,7 +277,7 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
             st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
 
         # 返回歷史數據的子集，用於繪製圖表
-        history_df_for_chart = df.tail(history_days).copy()
+        history_df_for_chart = df_clean.tail(history_days_chart).copy()
         
         return last_close, predictions, preds, history_df_for_chart
 
@@ -417,8 +420,8 @@ if st.button("🔮 開始預測", type="primary"):
             st.write(f"最佳買點：**{min_date}**，預測價格：${min_price:.2f}")
             st.write(f"最佳賣點：**{max_date}**，預測價格：${max_price:.2f}")
 
-        # 組合歷史和預測數據，並確保歷史數據為 15 天
-        history_df = history_df_for_chart.tail(history_days_chart).copy()
+        # 組合歷史和預測數據
+        history_df = history_df_for_chart.tail(15).copy()
         history_df = history_df[['Close']]
         history_df.index = history_df.index.strftime('%Y-%m-%d')
         
