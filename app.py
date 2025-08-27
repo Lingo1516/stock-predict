@@ -302,46 +302,49 @@ def get_day_trading_advice(stock):
         if len(df_historical) < 2:
             return "無法提供當沖建議", "neutral", None, None
 
-        # 計算 ATR，作為波動率參考
         df_historical['TR'] = np.maximum(np.maximum(df_historical['High'] - df_historical['Low'], abs(df_historical['High'] - df_historical['Close'].shift(1))), abs(df_historical['Low'] - df_historical['Close'].shift(1)))
         df_historical['ATR'] = df_historical['TR'].rolling(window=14).mean()
         
         atr_value = df_historical['ATR'].iloc[-1].item()
         
-        # 取得最新開盤價
         df_today = yf.download(stock, period='2d', interval='1d', auto_adjust=True)
-        if len(df_today) < 1:
+        if len(df_today) < 2: # 檢查是否有足夠數據 (今日開盤價及昨日收盤價)
             return "無法提供當沖建議", "neutral", None, None
 
         today_open = df_today.iloc[-1]['Open'].item()
+        yesterday_close = df_today.iloc[-2]['Close'].item()
         
-        # 模擬盤中隨機變動
-        np.random.seed(int(datetime.now().timestamp()))
-        intraday_change = np.random.uniform(-0.01, 0.01) # 模擬盤中1%的隨機變動
-        intraday_change_pct = intraday_change * 100
+        # 模擬盤中趨勢，基於開盤價與昨日收盤價的關係
+        gap_pct = (today_open - yesterday_close) / yesterday_close
         
         advice_text = ""
         advice_type = "neutral"
         suggested_buy_price = None
         suggested_sell_price = None
 
-        # 根據 ATR 估算當沖區間
-        if not np.isnan(atr_value):
-            # 買入建議：開盤價 - (0.5 * ATR)
-            suggested_buy_price = today_open - (atr_value * 0.5)
-            # 賣出建議：開盤價 + (0.5 * ATR)
-            suggested_sell_price = today_open + (atr_value * 0.5)
-
-        if intraday_change_pct > 0.5:
-            advice_text = f"盤中股價強勢上漲，適合偏多當沖 ({intraday_change_pct:.2f}%)"
-            advice_type = "bullish"
-        elif intraday_change_pct < -0.5:
-            advice_text = f"盤中股價弱勢下跌，適合偏空當沖 ({intraday_change_pct:.2f}%)"
-            advice_type = "bearish"
-        else:
-            advice_text = "盤中波動不明顯，建議觀望"
-            advice_type = "neutral"
+        if not np.isnan(atr_value) and not np.isnan(today_open):
+            # 根據 ATR 估算當沖區間
+            volatility_factor = 0.5 # 可調整的波動因子
+            buy_price_base = today_open - (atr_value * volatility_factor)
+            sell_price_base = today_open + (atr_value * volatility_factor)
             
+            # 根據模擬趨勢調整建議
+            if gap_pct > 0.01: # 大幅跳空高開
+                advice_text = "盤中強勢，適合偏多當沖"
+                advice_type = "bullish"
+                suggested_buy_price = buy_price_base
+                suggested_sell_price = sell_price_base + (atr_value * 0.5) # 提高賣出價
+            elif gap_pct < -0.01: # 大幅跳空低開
+                advice_text = "盤中弱勢，適合偏空當沖"
+                advice_type = "bearish"
+                suggested_buy_price = buy_price_base - (atr_value * 0.5) # 降低買入價
+                suggested_sell_price = sell_price_base
+            else:
+                advice_text = "盤中波動不明顯，建議觀望"
+                advice_type = "neutral"
+                suggested_buy_price = buy_price_base
+                suggested_sell_price = sell_price_base
+
         return advice_text, advice_type, suggested_buy_price, suggested_sell_price
 
     except Exception:
@@ -408,7 +411,7 @@ if st.button("🔮 開始預測", type="primary"):
                 st.info(f"📊 **當沖建議**: {day_trading_advice}")
             
             # 顯示當沖買賣價建議
-            if buy_price and sell_price:
+            if buy_price is not None and sell_price is not None:
                 st.markdown("### 📌 當沖買賣區間建議 (模擬)")
                 st.write(f"建議買入價：**${buy_price:.2f}**")
                 st.write(f"建議賣出價：**${sell_price:.2f}**")
