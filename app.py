@@ -9,101 +9,128 @@ from sklearn.ensemble import RandomForestRegressor
 import numpy as np
 import ta
 
-# 快取股票清單
-@st.cache_data(ttl=3600)  # 快取1小時
+# 內建常用股票清單
 def get_taiwan_stocks():
-    """獲取台灣股市所有股票清單"""
-    try:
-        # 上市股票
-        url_listed = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=2'
-        response = requests.get(url_listed, timeout=10)
-        response.encoding = 'big5'
+    """獲取台灣股市股票清單（使用內建資料確保穩定性）"""
+    # 擴展的台股清單
+    stocks = {
+        # 熱門大型股
+        '2330': '台積電', '台積電': '2330',
+        '2317': '鴻海', '鴻海': '2317',
+        '2454': '聯發科', '聯發科': '2454',
+        '2881': '富邦金', '富邦金': '2881',
+        '2412': '中華電', '中華電': '2412',
+        '2303': '聯電', '聯電': '2303',
+        '2002': '中鋼', '中鋼': '2002',
+        '1301': '台塑', '台塑': '1301',
+        '2882': '國泰金', '國泰金': '2882',
+        '2886': '兆豐金', '兆豐金': '2886',
+        '2891': '中信金', '中信金': '2891',
+        '2884': '玉山金', '玉山金': '2884',
+        '2885': '元大金', '元大金': '2885',
+        '2892': '第一金', '第一金': '2892',
+        '2883': '開發金', '開發金': '2883',
         
-        stocks = {}
-        lines = response.text.split('\n')
+        # 科技股
+        '2379': '瑞昱', '瑞昱': '2379',
+        '2408': '南亞科', '南亞科': '2408',
+        '3711': '日月光投控', '日月光投控': '3711',
+        '2357': '華碩', '華碩': '2357',
+        '2382': '廣達', '廣達': '2382',
+        '2395': '研華', '研華': '2395',
+        '6505': '台塑化', '台塑化': '6505',
+        '2409': '友達', '友達': '2409',
+        '2474': '可成', '可成': '2474',
+        '3008': '大立光', '大立光': '3008',
         
-        for line in lines:
-            if '股票' in line and 'ESVUFR' not in line:
-                parts = line.strip().split('\t')
-                if len(parts) >= 2:
-                    code_name = parts[0].strip()
-                    if '　' in code_name:
-                        code, name = code_name.split('　', 1)
-                        code = code.strip()
-                        name = name.strip()
-                        if code.isdigit() and len(code) == 4:
-                            stocks[code] = name
-                            stocks[name] = code
+        # 傳統產業
+        '1303': '南亞', '南亞': '1303',
+        '1326': '台化', '台化': '1326',
+        '2207': '和泰車', '和泰車': '2207',
+        '2301': '光寶科', '光寶科': '2301',
+        '2308': '台達電', '台達電': '2308',
+        '2105': '正新', '正新': '2105',
+        '2912': '統一超', '統一超': '2912',
+        '2801': '彰銀', '彰銀': '2801',
+        '2880': '華南金', '華南金': '2880',
+        '2890': '永豐金', '永豐金': '2890',
         
-        # 上櫃股票
-        url_otc = 'https://isin.twse.com.tw/isin/C_public.jsp?strMode=4'
-        response = requests.get(url_otc, timeout=10)
-        response.encoding = 'big5'
+        # ETF
+        '0050': '元大台灣50', '元大台灣50': '0050',
+        '0056': '元大高股息', '元大高股息': '0056',
+        '006208': '富邦台50', '富邦台50': '006208',
+        '00878': '國泰永續高股息', '國泰永續高股息': '00878',
+        '00692': '富邦公司治理', '富邦公司治理': '00692',
         
-        lines = response.text.split('\n')
-        for line in lines:
-            if '股票' in line and 'ESVUFR' not in line:
-                parts = line.strip().split('\t')
-                if len(parts) >= 2:
-                    code_name = parts[0].strip()
-                    if '　' in code_name:
-                        code, name = code_name.split('　', 1)
-                        code = code.strip()
-                        name = name.strip()
-                        if code.isdigit() and len(code) == 4:
-                            stocks[code] = name
-                            stocks[name] = code
-        
-        return stocks
-        
-    except Exception as e:
-        st.warning(f"無法獲取完整股票清單: {e}")
-        # 返回常見股票的備用清單
-        return {
-            '2330': '台積電', '台積電': '2330',
-            '2317': '鴻海', '鴻海': '2317',
-            '2454': '聯發科', '聯發科': '2454',
-            '2881': '富邦金', '富邦金': '2881',
-            '2412': '中華電', '中華電': '2412',
-            '2303': '聯電', '聯電': '2303',
-            '2002': '中鋼', '中鋼': '2002',
-            '1301': '台塑', '台塑': '1301',
-        }
+        # 簡化名稱映射
+        '積電': '2330',
+        '聯發': '2454',
+        '富邦': '2881',
+        '國泰': '2882',
+        '中信': '2891',
+        '玉山': '2884',
+        '元大': '2885',
+        '台塑': '1301',
+        '南亞': '1303',
+        '台化': '1326',
+        '中鋼': '2002',
+        '鴻海': '2317',
+        '聯電': '2303',
+        '中華電': '2412',
+        '大立光': '3008',
+        '台達電': '2308',
+    }
+    
+    return stocks
 
 def parse_stock_input(user_input, stock_dict):
     """
-    解析用戶輸入，支援多種格式：
-    - 中文名稱：台積電
-    - 純數字代號：2330
-    - 完整代號：2330.TW
+    解析用戶輸入，支援多種格式
     """
     user_input = user_input.strip()
     
-    # 情況1: 直接輸入中文名稱
+    # 特殊處理
+    if not user_input:
+        return None, None
+    
+    # 情況1: 直接輸入中文名稱（完整匹配）
     if user_input in stock_dict:
-        code = stock_dict[user_input]
-        name = user_input if not code.isdigit() else stock_dict.get(code, '未知股票')
-        return f"{code}.TW", name
+        if user_input.isdigit():
+            # 用戶輸入的是代號
+            code = user_input
+            name = stock_dict.get(code, f"股票{code}")
+            return f"{code}.TW", name
+        else:
+            # 用戶輸入的是名稱
+            code = stock_dict[user_input]
+            return f"{code}.TW", user_input
     
     # 情況2: 純數字代號
-    if user_input.isdigit() and len(user_input) == 4:
+    if user_input.isdigit():
         code = user_input
         name = stock_dict.get(code, f"股票{code}")
         return f"{code}.TW", name
     
-    # 情況3: 已經包含 .TW 的代號
-    if user_input.endswith('.TW') or user_input.endswith('.TWO'):
-        code = user_input.split('.')[0]
+    # 情況3: 已經包含 .TW/.TWO 的代號
+    if '.TW' in user_input.upper() or '.TWO' in user_input.upper():
+        parts = user_input.upper().split('.')
+        code = parts[0]
         if code.isdigit():
             name = stock_dict.get(code, f"股票{code}")
-            return user_input, name
+            return user_input.upper(), name
+        return user_input.upper(), user_input.upper()
     
-    # 情況4: 模糊搜尋中文名稱
+    # 情況4: 部分匹配中文名稱
     for name, code in stock_dict.items():
-        if not code.isdigit() and user_input in name:
-            return f"{stock_dict[name]}.TW", name
+        if not name.isdigit() and len(name) > 1:
+            if user_input in name or name in user_input:
+                return f"{code}.TW" if code.isdigit() else f"{stock_dict.get(name, '0000')}.TW", name
     
-    # 情況5: 其他格式（如美股等）
+    # 情況5: 美股或其他市場（直接使用）
+    if user_input.isalpha() and len(user_input) <= 5:
+        return user_input.upper(), user_input.upper()
+    
+    # 情況6: 無法識別，嘗試直接使用
     return user_input, user_input
 
 @st.cache_data
@@ -114,7 +141,15 @@ def predict_next_5(stock_input, days, decay_factor):
         stock_dict = get_taiwan_stocks()
         
         # 解析用戶輸入
-        stock_code, stock_name = parse_stock_input(stock_input, stock_dict)
+        parsed_result = parse_stock_input(stock_input, stock_dict)
+        if parsed_result[0] is None:
+            st.error("無法解析輸入的股票")
+            return None, None, None, None
+            
+        stock_code, stock_name = parsed_result
+        
+        # 調試信息
+        st.info(f"正在查詢：{stock_name} ({stock_code})")
         
         # 設定時間範圍
         end = pd.Timestamp(datetime.today().date())
@@ -126,43 +161,61 @@ def predict_next_5(stock_input, days, decay_factor):
         
         for attempt in range(max_retries):
             try:
+                st.write(f"嘗試下載 {stock_code} 的資料... (第 {attempt + 1} 次)")
+                
                 df = yf.download(stock_code, start=start, end=end + pd.Timedelta(days=1),
                                interval="1d", auto_adjust=True, progress=False)
-                twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1),
-                                 interval="1d", auto_adjust=True, progress=False)
-                sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1),
-                               interval="1d", auto_adjust=True, progress=False)
                 
-                if not (df.empty or twii.empty or sp.empty):
+                # 檢查是否有資料
+                if df is not None and not df.empty:
+                    st.write(f"✅ 成功下載 {stock_code} 資料，共 {len(df)} 筆")
                     break
+                else:
+                    st.write(f"❌ {stock_code} 無資料")
                     
             except Exception as e:
-                st.warning(f"嘗試 {attempt + 1}/{max_retries} 下載失敗: {e}")
-                time.sleep(2)
+                st.warning(f"下載 {stock_code} 失敗: {str(e)}")
+                time.sleep(1)
                 
-            if attempt == max_retries - 1:
-                st.error(f"無法下載資料：{stock_code}")
-                return None, None, None, None
-
-        # 檢查資料充足性
-        if df is None or len(df) < 50:
-            st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據")
+        # 下載指數資料
+        try:
+            twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1),
+                             interval="1d", auto_adjust=True, progress=False)
+            sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1),
+                           interval="1d", auto_adjust=True, progress=False)
+        except:
+            st.warning("指數資料下載失敗，使用預設值")
+            twii = pd.DataFrame()
+            sp = pd.DataFrame()
+                
+        if df is None or df.empty:
+            st.error(f"無法下載 {stock_code} 的資料，請檢查股票代號")
             return None, None, None, None
+            
+        if len(df) < 50:
+            st.warning(f"資料不足，僅有 {len(df)} 行數據，預測可能不準確")
 
         # 處理多重索引
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] for col in df.columns]
-        if isinstance(twii.columns, pd.MultiIndex):
+        if not twii.empty and isinstance(twii.columns, pd.MultiIndex):
             twii.columns = [col[0] for col in twii.columns]
-        if isinstance(sp.columns, pd.MultiIndex):
+        if not sp.empty and isinstance(sp.columns, pd.MultiIndex):
             sp.columns = [col[0] for col in sp.columns]
 
         # 獲取收盤價
         close = df['Close'].squeeze() if 'Close' in df.columns else df.iloc[:, 3].squeeze()
         
         # 填充外部指數資料
-        df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
-        df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
+        if not twii.empty and 'Close' in twii.columns:
+            df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill').fillna(close.mean())
+        else:
+            df['TWII_Close'] = close.mean()  # 使用平均值作為預設
+            
+        if not sp.empty and 'Close' in sp.columns:
+            df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill').fillna(close.mean())
+        else:
+            df['SP500_Close'] = close.mean()  # 使用平均值作為預設
 
         # 計算技術指標
         df['MA5'] = close.rolling(5, min_periods=1).mean()
@@ -176,7 +229,7 @@ def predict_next_5(stock_input, days, decay_factor):
             delta = close.diff()
             gain = delta.where(delta > 0, 0).rolling(14, min_periods=1).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=1).mean()
-            rs = gain / loss
+            rs = gain / loss.replace(0, 1)  # 避免除零
             df['RSI'] = 100 - (100 / (1 + rs))
 
         # MACD
@@ -190,6 +243,11 @@ def predict_next_5(stock_input, days, decay_factor):
             df['MACD'] = ema12 - ema26
             df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
 
+        # 填充可能的 NaN 值
+        df['RSI'] = df['RSI'].fillna(50)  # RSI 預設值 50
+        df['MACD'] = df['MACD'].fillna(0)  # MACD 預設值 0
+        df['MACD_Signal'] = df['MACD_Signal'].fillna(0)
+
         # 添加滯後特徵
         df['Prev_Close'] = close.shift(1)
         for i in range(1, 4):
@@ -199,7 +257,7 @@ def predict_next_5(stock_input, days, decay_factor):
         if 'Volume' in df.columns:
             df['Volume_MA'] = df['Volume'].rolling(10, min_periods=1).mean()
         else:
-            df['Volume_MA'] = 0
+            df['Volume_MA'] = 1000000  # 預設成交量
         
         df['Volatility'] = close.rolling(10, min_periods=1).std()
 
@@ -211,7 +269,7 @@ def predict_next_5(stock_input, days, decay_factor):
         # 清理資料
         df_clean = df[features + ['Close']].dropna()
         
-        if len(df_clean) < 30:
+        if len(df_clean) < 10:
             st.error(f"清理後資料不足，僅有 {len(df_clean)} 行")
             return None, None, None, None
 
@@ -230,7 +288,7 @@ def predict_next_5(stock_input, days, decay_factor):
         weights = weights / np.sum(weights)
 
         # 訓練/驗證分割
-        split_idx = int(len(X_normalized) * 0.8)
+        split_idx = max(1, int(len(X_normalized) * 0.8))
         X_train, X_val = X_normalized[:split_idx], X_normalized[split_idx:]
         y_train, y_val = y[:split_idx], y[split_idx:]
         train_weights = weights[:split_idx]
@@ -262,6 +320,42 @@ def predict_next_5(stock_input, days, decay_factor):
         # 逐步預測
         for i, date in enumerate(future_dates):
             pred = model.predict(current_features)[0]
+            
+            # 加入合理的隨機變化
+            volatility = np.std(y[-30:]) / np.mean(y[-30:]) if len(y) >= 30 else 0.02
+            variation = np.random.normal(0, pred * volatility * 0.1)
+            final_pred = pred + variation
+            
+            predictions[date] = float(final_pred)
+            predicted_prices.append(final_pred)
+            
+            # 更新特徵
+            if i < 4:
+                new_features = current_features[0].copy()
+                
+                # 更新價格相關特徵
+                prev_close_idx = features.index('Prev_Close')
+                new_features[prev_close_idx] = (final_pred - X_mean[prev_close_idx]) / X_std[prev_close_idx]
+                
+                # 更新滯後特徵
+                for j in range(1, min(4, len(predicted_prices))):
+                    if f'Prev_Close_Lag{j}' in features:
+                        lag_idx = features.index(f'Prev_Close_Lag{j}')
+                        lag_price = predicted_prices[-(j+1)]
+                        new_features[lag_idx] = (lag_price - X_mean[lag_idx]) / X_std[lag_idx]
+                
+                current_features = new_features.reshape(1, -1)
+
+        # 計算預測字典
+        preds = {f'T+{i+1}': pred for i, pred in enumerate(predictions.values())}
+        
+        return last_close, predictions, preds, stock_name
+
+    except Exception as e:
+        st.error(f"預測過程發生錯誤: {str(e)}")
+        import traceback
+        st.error(f"詳細錯誤: {traceback.format_exc()}")
+        return None, None, None, Nonecurrent_features)[0]
             
             # 加入合理的隨機變化
             volatility = np.std(y[-30:]) / np.mean(y[-30:])
