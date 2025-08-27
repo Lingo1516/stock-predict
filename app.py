@@ -202,8 +202,7 @@ def get_trade_advice(last, preds):
     else:
         return f"持有 (預期變動 {change_percent:.1f}%)"
 
-
-# Streamlit 介面
+# Streamlit UI
 st.title("📈 5 日股價預測系統")
 st.markdown("---")
 
@@ -233,11 +232,18 @@ if st.button("🔮 開始預測", type="primary"):
     else:
         st.success("✅ 預測完成！")
 
+        # 抓取並顯示股票中文名稱
+        try:
+            ticker_info = yf.Ticker(full_code).info
+            company_name = ticker_info.get('shortName') or ticker_info.get('longName') or "無法取得名稱"
+        except Exception:
+            company_name = "無法取得名稱"
+        st.write(f"📌 股票名稱：**{company_name}**")
+
         col1, col2 = st.columns(2)
         with col1:
             st.metric("當前股價", f"${last:.2f}")
             advice = get_trade_advice(last, preds)
-
             if "買入" in advice:
                 st.success(f"📈 **交易建議**: {advice}")
             elif "賣出" in advice:
