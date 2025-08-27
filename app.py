@@ -21,7 +21,7 @@ stock_name_dict = {
 def get_stock_name(stock_code):
     # 如果輸入的是代號，返回對應的名稱
     stock_code = stock_code.strip().upper()
-    return stock_name_dict.get(stock_code, "未知股票代號")
+    return stock_name_dict.get(stock_code, None)
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
@@ -251,7 +251,10 @@ with col2:
 stock_name = get_stock_name(stock_input.strip())
 
 # 顯示選擇的股票名稱
-st.info(f"您選擇的股票是: {stock_name}")
+if stock_name:
+    st.info(f"您選擇的股票是: {stock_name}")
+else:
+    st.error("無法識別此股票代號，請檢查代號或名稱")
 
 # 模式說明
 mode_info = {
