@@ -4,13 +4,9 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
-import ta
+import pandas_ta as ta  # 替換為 pandas-ta
 from datetime import datetime
 import time
-from ta.volatility import BollingerBands
-from ta.trend import ADXIndicator, CCIIndicator
-from ta.momentum import StochasticOscillator
-from ta.volume import OnBalanceVolume
 
 # 股票代號到中文名稱簡易對照字典，可自行擴充
 stock_name_dict = {
@@ -72,66 +68,57 @@ def predict_next_5(stock, days, decay_factor):
             st.error("股票數據中缺少必要的欄位 (Close, High, Low)。")
             return None, None, None
 
-        close = df['Close'].squeeze()
-        
         # 整合市場指數
         df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
         df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
 
-        # === 核心技術指標計算 ===
+        # === 核心技術指標計算 (使用 pandas-ta) ===
         # 移動平均線
-        df['MA5'] = close.rolling(5, min_periods=1).mean()
-        df['MA10'] = close.rolling(10, min_periods=1).mean()
-        df['MA20'] = close.rolling(20, min_periods=1).mean()
+        df['MA5'] = ta.sma(df['Close'], length=5)
+        df['MA10'] = ta.sma(df['Close'], length=10)
+        df['MA20'] = ta.sma(df['Close'], length=20)
 
         # 相對強弱指標 (RSI)
-        df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
+        df['RSI'] = ta.rsi(df['Close'], length=14)
         
         # 移動平均收斂散度 (MACD)
-        macd = ta.trend.MACD(close)
-        df['MACD'] = macd.macd()
-        df['MACD_Signal'] = macd.macd_signal()
+        macd_df = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+        df['MACD'] = macd_df['MACD_12_26_9']
+        df['MACD_Signal'] = macd_df['MACDs_12_26_9']
         
         # 布林帶 (Bollinger Bands)
-        bb_indicator = BollingerBands(close, window=20, window_dev=2)
-        df['BB_High'] = bb_indicator.bollinger_hband()
-        df['BB_Low'] = bb_indicator.bollinger_lband()
+        bb_df = ta.bbands(df['Close'], length=20, std=2)
+        df['BB_High'] = bb_df['BBU_20_2.0']
+        df['BB_Low'] = bb_df['BBL_20_2.0']
         
         # 平均趨向指標 (ADX)
-        adx_indicator = ADXIndicator(df['High'], df['Low'], close, window=14)
-        df['ADX'] = adx_indicator.adx()
+        adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+        df['ADX'] = adx_df['ADX_14']
         
         # === 新增技術指標 ===
         # 隨機指標 (Stochastic Oscillator)
-        stoch = StochasticOscillator(high=df['High'], low=df['Low'], close=close, window=14, smooth_window=3)
-        df['STOCH_K'] = stoch.stoch()
-        df['STOCH_D'] = stoch.stoch_signal()
+        stoch_df = ta.stoch(df['High'], df['Low'], df['Close'], k=14, d=3)
+        df['STOCH_K'] = stoch_df['STOCHk_14_3']
+        df['STOCH_D'] = stoch_df['STOCHd_14_3']
 
         # 商品通道指標 (CCI)
-        cci = CCIIndicator(high=df['High'], low=df['Low'], close=close, window=20)
-        df['CCI'] = cci.cci()
+        df['CCI'] = ta.cci(df['High'], df['Low'], df['Close'], length=20)
 
         # 能量潮 (On-Balance Volume)
-        if 'Volume' in df.columns and not df['Volume'].isnull().all():
-            obv = OnBalanceVolume(close, df['Volume'])
-            df['OBV'] = obv.on_balance_volume()
-            # 增加OBV的移動平均作為趨勢特徵
-            df['OBV_MA'] = df['OBV'].rolling(10, min_periods=1).mean()
-        else:
-            df['OBV'] = 0
-            df['OBV_MA'] = 0
+        df['OBV'] = ta.obv(df['Close'], df['Volume'])
+        df['OBV_MA'] = ta.sma(df['OBV'], length=10)
 
         # === 其他特徵 ===
-        df['Prev_Close'] = close.shift(1)
+        df['Prev_Close'] = df['Close'].shift(1)
         for i in range(1, 4):
-            df[f'Prev_Close_Lag{i}'] = close.shift(i)
+            df[f'Prev_Close_Lag{i}'] = df['Close'].shift(i)
 
         if 'Volume' in df.columns:
-            df['Volume_MA'] = df['Volume'].rolling(10, min_periods=1).mean()
+            df['Volume_MA'] = ta.sma(df['Volume'], length=10)
         else:
             df['Volume_MA'] = 0
 
-        df['Volatility'] = close.rolling(10, min_periods=1).std()
+        df['Volatility'] = df['Close'].rolling(10, min_periods=1).std()
 
         # === 定義特徵集 ===
         feats = [
