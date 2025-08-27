@@ -317,7 +317,7 @@ def get_day_trading_advice(stock):
         yesterday_close = df_last_two_days.iloc[-2]['Close'].item()
         
         # 判斷當前時間
-        now = datetime.now().time()
+        now_time = datetime.now().time()
         market_open_time = time(9, 0)
         market_close_time = time(13, 30)
 
@@ -328,7 +328,7 @@ def get_day_trading_advice(stock):
         
         volatility_factor = 0.6 # 可調整的波動因子，影響建議區間大小
 
-        if now >= market_open_time and now <= market_close_time:
+        if now_time >= market_open_time and now_time <= market_close_time:
             # 盤中建議
             # 模擬盤中趨勢，基於開盤價與昨日收盤價的關係
             gap_pct = (today_open - yesterday_close) / yesterday_close
