@@ -3,11 +3,9 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
-import ta
-from datetime import datetime, timedelta
 import time
+from datetime import datetime, timedelta
+import ta
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
@@ -252,18 +250,6 @@ def predict_next_5(stock, days, decay_factor):
         # 計算預測字典
         preds = {f'T+{i+1}': pred for i, pred in enumerate(predictions.values())}
 
-        # 驗證模型（使用主模型）
-        if len(X_val) > 0:
-            y_pred_val = models[0][1].predict(X_val)  # 使用第一個模型進行驗證
-            mse = mean_squared_error(y_val, y_pred_val)
-            rmse = np.sqrt(mse)
-            st.info(f"模型驗證 - RMSE: {rmse:.2f} (約 {rmse/last_close*100:.1f}%)")
-            
-            # 顯示特徵重要性
-            feature_importance = models[0][1].feature_importances_
-            top_features = sorted(zip(feats, feature_importance), key=lambda x: x[1], reverse=True)[:5]
-            st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
-        
         return last_close, predictions, preds
 
     except Exception as e:
@@ -297,7 +283,7 @@ st.markdown("---")
 # 輸入區域
 col1, col2 = st.columns([2, 1])
 with col1:
-    code = st.text_input("請輸入股票代號", "2330.TW", help="例如：2330.TW (台積電)、AAPL (蘋果)")
+    code = st.text_input("請輸入股票代號", "2330", help="例如：2330 (台積電)、AAPL (蘋果)")
 
 with col2:
     mode = st.selectbox("預測模式", ["中期模式", "短期模式", "長期模式"])
