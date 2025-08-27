@@ -91,7 +91,7 @@ def predict_next_15(stock, days_for_model, forecast_days, decay_factor):
     try:
         end = pd.Timestamp(datetime.today().date())
         # 下載更多天數以確保有足夠的數據計算指標
-        days_to_download = days_for_model + 50 
+        days_to_download = days_for_model + 60 
         start = end - pd.Timedelta(days=days_to_download) 
         
         max_retries = 3
@@ -277,7 +277,7 @@ def predict_next_15(stock, days_for_model, forecast_days, decay_factor):
             st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
 
         # 返回歷史數據的子集，用於繪製圖表
-        history_df_for_chart = df_clean.tail(history_days_chart).copy()
+        history_df_for_chart = df_clean.tail(15).copy()
         
         return last_close, predictions, preds, history_df_for_chart
 
