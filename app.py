@@ -328,7 +328,21 @@ def get_day_trading_advice(stock):
         
         volatility_factor = 0.6 # 可調整的波動因子，影響建議區間大小
 
-        if now_time >= market_open_time and now_time <= market_close_time:
+        # 盤後或盤前建議
+        if not (now_time >= market_open_time and now_time <= market_close_time):
+            # 使用昨日收盤價來預估明日的當沖區間
+            base_price = yesterday_close
+            
+            # 使用 ATR 估算明日的波動區間
+            buy_price_prediction = base_price - (atr_value * volatility_factor)
+            sell_price_prediction = base_price + (atr_value * volatility_factor)
+            
+            advice_text = "盤後預測，建議明日當沖關注"
+            advice_type = "neutral"
+            suggested_buy_price = buy_price_prediction
+            suggested_sell_price = sell_price_prediction
+            
+        else:
             # 盤中建議
             # 模擬盤中趨勢，基於開盤價與昨日收盤價的關係
             gap_pct = (today_open - yesterday_close) / yesterday_close
@@ -349,20 +363,6 @@ def get_day_trading_advice(stock):
                 suggested_buy_price = today_open - (atr_value * volatility_factor)
                 suggested_sell_price = today_open + (atr_value * volatility_factor)
 
-        else:
-            # 盤後或盤前建議
-            # 使用昨日收盤價來預估明日的當沖區間
-            base_price = yesterday_close
-            
-            # 使用 ATR 估算明日的波動區間
-            buy_price_prediction = base_price - (atr_value * volatility_factor)
-            sell_price_prediction = base_price + (atr_value * volatility_factor)
-            
-            advice_text = "盤後預測，建議明日當沖關注"
-            advice_type = "neutral"
-            suggested_buy_price = buy_price_prediction
-            suggested_sell_price = sell_price_prediction
-        
         return advice_text, advice_type, suggested_buy_price, suggested_sell_price
 
     except Exception as e:
