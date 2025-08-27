@@ -63,6 +63,9 @@ def predict_next_5(stock, days, decay_factor):
         st.error(f"資料不足，僅有 {len(df)} 行數據")
         return None, None, None
 
+    # 定義 last 變量
+    last = float(close.iloc[-1])
+
     # 標準化特徵
     df_standardized = (df[feats] - df[feats].mean()) / df[feats].std()
 
@@ -100,7 +103,6 @@ def predict_next_5(stock, days, decay_factor):
         pred = np.clip(pred, last - price_range, last + price_range)
         preds[f'T+{d}'] = float(pred)
 
-    last = float(close.iloc[-1])
     dates = [(end + pd.offsets.BDay(d)).date() for d in range(1, 6)]
     return last, dict(zip(dates, preds.values())), preds
 
