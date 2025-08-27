@@ -68,6 +68,18 @@ def calculate_technical_indicators(df):
     # 新增 ROC (Rate of Change)
     df['ROC'] = df['Close'].diff(periods=12) / df['Close'].shift(periods=12) * 100
     
+    # === 新增三大法人相關指標（需外部數據支持） ===
+    # 假設您已經有一個 DataFrame `institutional_data` 包含了三大法人的每日買賣超數據
+    # 範例：institutional_data = pd.read_csv('path/to/your/institutional_data.csv', index_col='Date', parse_dates=True)
+    # df = df.join(institutional_data, how='left') # 假設 `institutional_data` 的欄位名稱與您的一樣
+    
+    # 這裡我們手動創建一些空欄位，代表未來將整合進來的數據
+    # 這些欄位將是模型預測的關鍵特徵
+    df['institutional_net_buy_sell'] = np.nan # 單日買賣超金額
+    df['institutional_5d_cum_net_buy_sell'] = np.nan # 5日累計買賣超
+    df['institutional_20d_cum_net_buy_sell'] = np.nan # 20日累計買賣超
+    df['institutional_10d_net_buy_sell_ma'] = np.nan # 10日買賣超移動平均
+    
     return df
 
 @st.cache_data
@@ -83,7 +95,7 @@ def predict_next_5(stock, days, decay_factor):
     """
     try:
         end = pd.Timestamp(datetime.today().date())
-        start = end - pd.Timedelta(days=days)
+        start = end - pd.Timedela(days=days)
         max_retries = 3
         df, twii, sp = None, None, None
 
@@ -116,14 +128,20 @@ def predict_next_5(stock, days, decay_factor):
         if isinstance(sp.columns, pd.MultiIndex):
             sp.columns = [col[0] for col in sp.columns]
 
-        if not all(col in df.columns for col in ['Close', 'High', 'Low']):
-            st.error("股票數據中缺少必要的欄位 (Close, High, Low)。")
+        if not all(col in df.columns for col in ['Close', 'High', 'Low', 'Volume']):
+            st.error("股票數據中缺少必要的欄位 (Close, High, Low, Volume)。")
             return None, None, None
 
         df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
         df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
 
         df = calculate_technical_indicators(df)
+        
+        # 新增三大法人買賣超欄位 (目前為空值，需手動匯入數據)
+        df['institutional_net_buy_sell'] = np.nan # 假設資料為每日買賣超金額
+        # 您可以在此處加入程式碼，從其他來源讀取並填入 df['institutional_net_buy_sell'] 的值
+        # 範例：df = pd.read_csv('institutional_data.csv', index_col='Date', parse_dates=True)
+        # df['institutional_net_buy_sell'] = institutional_data['Net_Buy_Sell']
 
         df['Prev_Close'] = df['Close'].shift(1)
         for i in range(1, 4):
@@ -139,7 +157,8 @@ def predict_next_5(stock, days, decay_factor):
         feats = [
             'Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
             'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
-            'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA', 'ATR', 'ROC'
+            'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA', 'ATR', 'ROC',
+            'institutional_net_buy_sell' # 新增的籌碼面特徵
         ] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
         missing_feats = [f for f in feats if f not in df.columns]
@@ -235,6 +254,10 @@ def predict_next_5(stock, days, decay_factor):
                     volatility_idx = feats.index('Volatility')
                     recent_volatility = np.std(predicted_prices[-min(10, len(predicted_prices)):])
                     new_features[volatility_idx] = (recent_volatility - X_mean[volatility_idx]) / X_std[volatility_idx]
+                
+                # 在此處為新的特徵賦予預測值 (目前暫時設為0)
+                institutional_idx = feats.index('institutional_net_buy_sell')
+                new_features[institutional_idx] = 0
 
                 current_features = new_features.reshape(1, -1)
 
