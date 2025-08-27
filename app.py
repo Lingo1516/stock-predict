@@ -91,7 +91,10 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
     try:
         end = pd.Timestamp(datetime.today().date())
         # 下載歷史數據天數調整為2倍歷史天數 + 預測天數，確保計算指標有足夠資料
-        start = end - pd.Timedelta(days=history_days * 2) 
+        # 新增邏輯：確保下載的歷史數據足夠計算所有指標，並用於圖表繪製
+        days_to_download = history_days + 30 # 下載更多天數以確保有足夠的數據計算指標
+        start = end - pd.Timedelta(days=days_to_download) 
+        
         max_retries = 3
         df, twii, sp = None, None, None
 
@@ -113,7 +116,7 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
                 st.error(f"無法下載資料：{stock}。請檢查股票代號或網路連線。")
                 return None, None, None, None
 
-        if df is None or len(df) < history_days * 2:
+        if df is None or len(df) < history_days_for_model + 30: # 確保有足夠的數據供模型訓練
             st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據，無法進行預測。")
             return None, None, None, None
 
@@ -164,7 +167,7 @@ def predict_next_15(stock, history_days, forecast_days, decay_factor):
 
         df_clean = df[feats + ['Close']].fillna(method='ffill').fillna(0)
         
-        if len(df_clean) < history_days * 2:
+        if len(df_clean) < 30:
             st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據，無法進行預測。")
             return None, None, None, None
 
@@ -335,7 +338,6 @@ col1, col2 = st.columns(2)
 with col1:
     code = st.text_input("請輸入股票代號（僅輸入數字部分即可）", "2330")
 with col2:
-    # 預設為中期模式，可供用戶選擇
     mode = st.selectbox("預測模式", ["中期模式", "短期模式", "長期模式"])
 
 mode_info = {
@@ -416,7 +418,7 @@ if st.button("🔮 開始預測", type="primary"):
             st.write(f"最佳賣點：**{max_date}**，預測價格：${max_price:.2f}")
 
         # 組合歷史和預測數據，並確保歷史數據為 15 天
-        history_df = df_history.tail(history_days_chart).copy()
+        history_df = history_df_for_chart.tail(history_days_chart).copy()
         history_df = history_df[['Close']]
         history_df.index = history_df.index.strftime('%Y-%m-%d')
         
