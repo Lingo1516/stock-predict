@@ -64,8 +64,7 @@ def download_stock_data(stock_name, start_date, end_date):
     else:
         return None
 
-@st.cache_data
-def predict_next_5(stock, days, decay_factor):
+def predict_next_5(stock, stock_list, days, decay_factor):
     try:
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
