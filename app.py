@@ -95,7 +95,7 @@ def predict_next_5(stock, days, decay_factor):
     """
     try:
         end = pd.Timestamp(datetime.today().date())
-        start = end - pd.Timedela(days=days)
+        start = end - pd.Timedelta(days=days)
         max_retries = 3
         df, twii, sp = None, None, None
 
