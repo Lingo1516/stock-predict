@@ -138,11 +138,15 @@ def predict_next_5(stock, days, decay_factor):
         df = calculate_technical_indicators(df)
         
         # 新增三大法人買賣超欄位 (目前為空值，需手動匯入數據)
-        df['institutional_net_buy_sell'] = np.nan # 假設資料為每日買賣超金額
-        # 您可以在此處加入程式碼，從其他來源讀取並填入 df['institutional_net_buy_sell'] 的值
-        # 範例：df = pd.read_csv('institutional_data.csv', index_col='Date', parse_dates=True)
-        # df['institutional_net_buy_sell'] = institutional_data['Net_Buy_Sell']
-
+        df['institutional_net_buy_sell'] = np.nan # 單日買賣超金額
+        df['institutional_5d_cum_net_buy_sell'] = np.nan # 5日累計買賣超
+        df['institutional_20d_cum_net_buy_sell'] = np.nan # 20日累計買賣超
+        df['institutional_10d_net_buy_sell_ma'] = np.nan # 10日買賣超移動平均
+        
+        # 在此處加入三大法人數據的處理邏輯
+        # 範例：df['institutional_net_buy_sell'] = pd.Series(...)
+        # df['institutional_5d_cum_net_buy_sell'] = df['institutional_net_buy_sell'].rolling(5).sum()
+        
         df['Prev_Close'] = df['Close'].shift(1)
         for i in range(1, 4):
             df[f'Prev_Close_Lag{i}'] = df['Close'].shift(i)
@@ -158,7 +162,7 @@ def predict_next_5(stock, days, decay_factor):
             'Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
             'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
             'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA', 'ATR', 'ROC',
-            'institutional_net_buy_sell' # 新增的籌碼面特徵
+            'institutional_net_buy_sell', 'institutional_5d_cum_net_buy_sell', 'institutional_20d_cum_net_buy_sell', 'institutional_10d_net_buy_sell_ma'
         ] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
         missing_feats = [f for f in feats if f not in df.columns]
@@ -166,7 +170,9 @@ def predict_next_5(stock, days, decay_factor):
             st.error(f"缺少特徵: {missing_feats}")
             return None, None, None
 
-        df_clean = df[feats + ['Close']].dropna()
+        # 修正後的資料清理方式：用前一個值填充空值，對於無法填充的空值設為0
+        df_clean = df[feats + ['Close']].fillna(method='ffill').fillna(0)
+        
         if len(df_clean) < 30:
             st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據，無法進行預測。")
             return None, None, None
