@@ -1,22 +1,35 @@
-import streamlit as st
+import requests
+from bs4 import BeautifulSoup
 import yfinance as yf
 import pandas as pd
-import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error
-import ta
-from datetime import datetime, timedelta
 import time
+from datetime import datetime
+import streamlit as st
+from sklearn.ensemble import RandomForestRegressor
+import numpy as np
+import ta
 
-# 股票名称到代号的映射字典（已更新为正确代号）
-stock_name_to_code = {
-    "台積電": "2330.TW",
-    "蘋果": "AAPL",
-    "谷歌": "GOOG",
-    "微軟": "MSFT",
-    "聯策": "6658.TW",  # 正确代号为 6658.TW
-    # 你可以根据需求添加更多股票
-}
+
+# 获取台湾股市所有上市、上柜公司的股票代号与名称
+def fetch_twse_stock_codes():
+    url = 'https://www.twse.com.tw/zh/listed/listed_companies'
+    response = requests.get(url)
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    # 解析 HTML 获取股票代码和公司名称
+    stock_data = []
+    rows = soup.find_all('tr', {'class': 'tableRow'})
+    for row in rows:
+        cols = row.find_all('td')
+        if len(cols) >= 2:
+            stock_name = cols[1].text.strip()
+            stock_code = cols[0].text.strip()
+            stock_data.append([stock_name, stock_code])
+
+    # 将数据存储为 pandas DataFrame
+    df = pd.DataFrame(stock_data, columns=['Stock Name', 'Stock Code'])
+    return df
+
 
 # 查询股票名称的函数
 def get_stock_name(stock_code):
@@ -31,54 +44,57 @@ def get_stock_name(stock_code):
         st.error(f"无法获取股票名称：{e}")
         return None
 
-# 根据股票名称获取股票代号
-def get_stock_code(stock_name):
+
+# 根据中文名称获取股票代号
+def get_stock_code(stock_name, stock_list):
     stock_name = stock_name.strip()
     # 尝试从字典中查找中文名称的代号
-    code = stock_name_to_code.get(stock_name, None)
-    
-    if not code:
-        try:
-            # 尝试从 Yahoo Finance 查找股票名称对应的代号
-            stock = yf.Ticker(stock_name)
-            info = stock.info
-            if info.get('symbol'):
-                return info['symbol']  # 返回正确的股票代号
-        except Exception as e:
-            st.warning(f"无法通过Yahoo Finance查找股票：{stock_name}，错误：{e}")
-    
-    # 如果没有找到代号，返回原始代号（用户输入）
-    return code if code else f"{stock_name}.TW"  # 自动加上 `.TW` 后缀
+    code_row = stock_list[stock_list['Stock Name'] == stock_name]
+    if not code_row.empty:
+        return f"{code_row.iloc[0]['Stock Code']}.TW"
+    else:
+        return None
+
+
+# 下载股票数据
+def download_stock_data(stock_name, stock_list, start_date, end_date):
+    stock_code = get_stock_code(stock_name, stock_list)
+    if stock_code:
+        df = yf.download(stock_code, start=start_date, end=end_date)
+        return df
+    else:
+        return None
+
 
 @st.cache_data
-def predict_next_5(stock, days, decay_factor):
+def predict_next_5(stock, stock_list, days, decay_factor):
     try:
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
 
         # 根据股票名称取得代号
-        stock_code = get_stock_code(stock.strip())
+        stock_code = get_stock_code(stock.strip(), stock_list)
 
         # 下载数据并添加错误处理
         max_retries = 3
         df, twii, sp = None, None, None
-        
+
         for attempt in range(max_retries):
             try:
-                df = yf.download(stock_code, start=start, end=end + pd.Timedelta(days=1), 
-                               interval="1d", auto_adjust=True, progress=False)
-                twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1), 
+                df = yf.download(stock_code, start=start, end=end + pd.Timedelta(days=1),
                                  interval="1d", auto_adjust=True, progress=False)
-                sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1), 
-                               interval="1d", auto_adjust=True, progress=False)
-                
+                twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1),
+                                   interval="1d", auto_adjust=True, progress=False)
+                sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1),
+                                 interval="1d", auto_adjust=True, progress=False)
+
                 if not (df.empty or twii.empty or sp.empty):
                     break
-                    
+
             except Exception as e:
                 st.warning(f"尝试 {attempt + 1}/{max_retries} 下载失败: {e}")
                 time.sleep(2)
-                
+
             if attempt == max_retries - 1:
                 st.error(f"无法下载数据：{stock_code}")
                 return None, None, None
@@ -98,7 +114,7 @@ def predict_next_5(stock, days, decay_factor):
 
         # 确保收盘价是一维序列
         close = df['Close'].squeeze() if 'Close' in df.columns else df.iloc[:, 3].squeeze()
-        
+
         # 填充外部指数资料
         df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
         df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
@@ -107,7 +123,7 @@ def predict_next_5(stock, days, decay_factor):
         df['MA10'] = close.rolling(10, min_periods=1).mean()
         df['MA20'] = close.rolling(20, min_periods=1).mean()
         df['MA5'] = close.rolling(5, min_periods=1).mean()
-        
+
         # 计算 RSI
         try:
             df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
@@ -144,12 +160,12 @@ def predict_next_5(stock, days, decay_factor):
 
         # 添加波动率指标
         df['Volatility'] = close.rolling(10, min_periods=1).std()
-        
+
         # 选择特征
-        feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD', 
-                'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility'] + \
+        feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
+                 'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility'] + \
                 [f'Prev_Close_Lag{i}' for i in range(1, 4)]
-        
+
         # 检查缺失的特征
         missing_feats = [f for f in feats if f not in df.columns]
         if missing_feats:
@@ -158,15 +174,15 @@ def predict_next_5(stock, days, decay_factor):
 
         # 移除有缺失值的行
         df_clean = df[feats + ['Close']].dropna()
-        
+
         if len(df_clean) < 30:
-            st.error(f"清理后数据不足，仅有 {len(df_clean)} 行数据")
+            st.error(f"数据不足，仅有 {len(df_clean)} 行数据")
             return None, None, None
 
         # 准备训练数据
         X = df_clean[feats].values
         y = df_clean['Close'].values
-        
+
         # 标准化特征
         X_mean = np.mean(X, axis=0)
         X_std = np.std(X, axis=0)
@@ -185,7 +201,7 @@ def predict_next_5(stock, days, decay_factor):
 
         # 训练多个模型来增加预测多样性
         models = []
-        
+
         # 主要随机森林模型
         rf_model = RandomForestRegressor(
             n_estimators=100,
@@ -197,12 +213,12 @@ def predict_next_5(stock, days, decay_factor):
         )
         rf_model.fit(X_train, y_train, sample_weight=train_weights)
         models.append(('RF', rf_model))
-        
+
         # 预测未来 5 天 - 使用集成模型
         last_features = X_normalized[-1:].copy()
         last_close = float(y[-1])
         predictions = {}
-        
+
         # 创建未来日期
         future_dates = []
         current_date = end
@@ -213,7 +229,7 @@ def predict_next_5(stock, days, decay_factor):
         # 逐步预测 - 每次预测后更新特征
         current_features = last_features.copy()
         predicted_prices = [last_close]  # 包含最后一天的实际价格
-        
+
         for i, date in enumerate(future_dates):
             # 使用模型进行预测并加上随机变化
             pred = rf_model.predict(current_features)[0]
@@ -221,19 +237,19 @@ def predict_next_5(stock, days, decay_factor):
             final_pred = pred + variation
             predictions[date] = final_pred
             predicted_prices.append(final_pred)
-            
+
             # 更新特征
             new_features = current_features[0].copy()
             prev_close_idx = feats.index('Prev_Close')
             new_features[prev_close_idx] = (final_pred - X_mean[prev_close_idx]) / X_std[prev_close_idx]
-            
+
             # 更新滞后特征
             for j in range(1, min(4, len(predicted_prices))):
                 if f'Prev_Close_Lag{j}' in feats:
                     lag_idx = feats.index(f'Prev_Close_Lag{j}')
                     lag_price = predicted_prices[-(j+1)]
                     new_features[lag_idx] = (lag_price - X_mean[lag_idx]) / X_std[lag_idx]
-                
+
             current_features = new_features.reshape(1, -1)
 
         # 计算预测字典
@@ -245,25 +261,6 @@ def predict_next_5(stock, days, decay_factor):
         st.error(f"预测过程发生错误: {str(e)}")
         return None, None, None
 
-def get_trade_advice(last, preds):
-    """根据预测结果给出交易建议"""
-    if not preds:
-        return "无法判断"
-    
-    price_changes = [preds[f'T+{d}'] - last for d in range(1, 6)]
-    avg_change = np.mean(price_changes)
-    change_percent = (avg_change / last) * 100
-    
-    if change_percent > 2:
-        return f"强烈买入 (预期上涨 {change_percent:.1f}%)"
-    elif change_percent > 0.5:
-        return f"买入 (预期上涨 {change_percent:.1f}%)"
-    elif change_percent < -2:
-        return f"强烈卖出 (预期下跌 {abs(change_percent):.1f}%)"
-    elif change_percent < -0.5:
-        return f"卖出 (预期下跌 {abs(change_percent):.1f}%)"
-    else:
-        return f"持有 (预期变动 {change_percent:.1f}%)"
 
 # Streamlit 界面
 st.title("📈 5 日股价预测系统")
@@ -276,6 +273,9 @@ with col1:
 
 with col2:
     mode = st.selectbox("预测模式", ["中期模式", "短期模式", "长期模式"])
+
+# 获取台湾股市股票数据
+stock_list = fetch_twse_stock_codes()
 
 # 根据股票代号查询股票名称
 stock_name = get_stock_name(stock_input.strip())
@@ -298,8 +298,8 @@ days, decay_factor = mode_info[mode][1], mode_info[mode][2]
 
 if st.button("🔮 开始预测", type="primary"):
     with st.spinner("正在下载资料并进行预测..."):
-        last, forecast, preds = predict_next_5(stock_input.strip().upper(), days, decay_factor)
-    
+        last, forecast, preds = predict_next_5(stock_input.strip(), stock_list, days, decay_factor)
+
     if last is None:
         st.error("❌ 预测失败，请检查股票代号或网络连接")
     else:
