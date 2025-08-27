@@ -27,13 +27,18 @@ def predict_next_5(stock, days, decay_factor):
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
 
+        # 確保股票代號是有效格式
+        stock_code = stock.strip().upper()
+        if not stock_code.endswith('.TW'):
+            stock_code += '.TW'  # 如果沒有 .TW，則自動補充
+
         # 下載資料並添加錯誤處理
         max_retries = 3
         df, twii, sp = None, None, None
         
         for attempt in range(max_retries):
             try:
-                df = yf.download(stock, start=start, end=end + pd.Timedelta(days=1), 
+                df = yf.download(stock_code, start=start, end=end + pd.Timedelta(days=1), 
                                interval="1d", auto_adjust=True, progress=False)
                 twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1), 
                                  interval="1d", auto_adjust=True, progress=False)
@@ -48,7 +53,7 @@ def predict_next_5(stock, days, decay_factor):
                 time.sleep(2)
                 
             if attempt == max_retries - 1:
-                st.error(f"無法下載資料：{stock}")
+                st.error(f"無法下載資料：{stock_code}")
                 return None, None, None
 
         # 檢查資料是否充足
