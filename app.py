@@ -68,19 +68,34 @@ def calculate_technical_indicators(df):
     # 新增 ROC (Rate of Change)
     df['ROC'] = df['Close'].diff(periods=12) / df['Close'].shift(periods=12) * 100
     
-    # === 新增三大法人相關指標（需外部數據支持） ===
-    # 假設您已經有一個 DataFrame `institutional_data` 包含了三大法人的每日買賣超數據
-    # 範例：institutional_data = pd.read_csv('path/to/your/institutional_data.csv', index_col='Date', parse_dates=True)
-    # df = df.join(institutional_data, how='left') # 假設 `institutional_data` 的欄位名稱與您的一樣
-    
-    # 這裡我們手動創建一些空欄位，代表未來將整合進來的數據
-    # 這些欄位將是模型預測的關鍵特徵
-    df['institutional_net_buy_sell'] = np.nan # 單日買賣超金額
-    df['institutional_5d_cum_net_buy_sell'] = np.nan # 5日累計買賣超
-    df['institutional_20d_cum_net_buy_sell'] = np.nan # 20日累計買賣超
-    df['institutional_10d_net_buy_sell_ma'] = np.nan # 10日買賣超移動平均
-    
     return df
+
+def generate_mock_institutional_data(df):
+    """
+    模擬生成三大法人買賣超數據。
+    在真實應用中，此處應替換為實際的數據爬取或API調用邏輯。
+    """
+    # 創建與主資料框索引相同的空DataFrame
+    institutional_data = pd.DataFrame(index=df.index)
+    
+    # 生成擬真的隨機買賣超數據
+    # 假設買賣超金額在 -5億 到 +5億 之間波動
+    np.random.seed(42) # 確保每次運行結果一致
+    institutional_data['net_buy_sell'] = np.random.uniform(-500_000_000, 500_000_000, len(df))
+    
+    # 計算累積買賣超
+    institutional_data['5d_cum'] = institutional_data['net_buy_sell'].rolling(window=5).sum()
+    institutional_data['20d_cum'] = institutional_data['net_buy_sell'].rolling(window=20).sum()
+    
+    # 計算移動平均
+    institutional_data['10d_ma'] = institutional_data['net_buy_sell'].rolling(window=10).mean()
+    
+    # 根據大盤漲跌與成交量，讓數據看起來更真實
+    # 假設大盤上漲時，法人買超機率較高
+    twii_change = df['TWII_Close'].pct_change()
+    institutional_data['net_buy_sell'] = institutional_data['net_buy_sell'] * (1 + twii_change.fillna(0) * 5)
+    
+    return institutional_data
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
@@ -137,16 +152,10 @@ def predict_next_5(stock, days, decay_factor):
 
         df = calculate_technical_indicators(df)
         
-        # 新增三大法人買賣超欄位 (目前為空值，需手動匯入數據)
-        df['institutional_net_buy_sell'] = np.nan # 單日買賣超金額
-        df['institutional_5d_cum_net_buy_sell'] = np.nan # 5日累計買賣超
-        df['institutional_20d_cum_net_buy_sell'] = np.nan # 20日累計買賣超
-        df['institutional_10d_net_buy_sell_ma'] = np.nan # 10日買賣超移動平均
-        
-        # 在此處加入三大法人數據的處理邏輯
-        # 範例：df['institutional_net_buy_sell'] = pd.Series(...)
-        # df['institutional_5d_cum_net_buy_sell'] = df['institutional_net_buy_sell'].rolling(5).sum()
-        
+        # 呼叫模擬數據生成器，並將結果與主資料框合併
+        institutional_data = generate_mock_institutional_data(df)
+        df = df.join(institutional_data, how='left')
+
         df['Prev_Close'] = df['Close'].shift(1)
         for i in range(1, 4):
             df[f'Prev_Close_Lag{i}'] = df['Close'].shift(i)
@@ -162,7 +171,8 @@ def predict_next_5(stock, days, decay_factor):
             'Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
             'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
             'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA', 'ATR', 'ROC',
-            'institutional_net_buy_sell', 'institutional_5d_cum_net_buy_sell', 'institutional_20d_cum_net_buy_sell', 'institutional_10d_net_buy_sell_ma'
+            # 新增的籌碼面特徵
+            'net_buy_sell', '5d_cum', '20d_cum', '10d_ma'
         ] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
         missing_feats = [f for f in feats if f not in df.columns]
@@ -262,7 +272,7 @@ def predict_next_5(stock, days, decay_factor):
                     new_features[volatility_idx] = (recent_volatility - X_mean[volatility_idx]) / X_std[volatility_idx]
                 
                 # 在此處為新的特徵賦予預測值 (目前暫時設為0)
-                institutional_idx = feats.index('institutional_net_buy_sell')
+                institutional_idx = feats.index('net_buy_sell')
                 new_features[institutional_idx] = 0
 
                 current_features = new_features.reshape(1, -1)
