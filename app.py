@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
-from datetime import datetime, time, timedelta
+from datetime import datetime
 import time
 
 # 股票代號到中文名稱簡易對照字典，可自行擴充
@@ -68,32 +68,49 @@ def calculate_technical_indicators(df):
     # 新增 ROC (Rate of Change)
     df['ROC'] = df['Close'].diff(periods=12) / df['Close'].shift(periods=12) * 100
     
-    # === 新增三大法人相關指標（需外部數據支持） ===
-    df['institutional_net_buy_sell'] = np.nan 
-    df['institutional_5d_cum_net_buy_sell'] = np.nan
-    df['institutional_20d_cum_net_buy_sell'] = np.nan
-    df['institutional_10d_net_buy_sell_ma'] = np.nan
-    
     return df
 
-@st.cache_data
-def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor):
+def generate_mock_institutional_data(df):
     """
-    下載股票數據，計算技術指標，並使用隨機森林模型預測未來15天的股價。
+    模擬生成三大法人買賣超數據。
+    在真實應用中，此處應替換為實際的數據爬取或API調用邏輯。
+    """
+    # 創建與主資料框索引相同的空DataFrame
+    institutional_data = pd.DataFrame(index=df.index)
+    
+    # 生成擬真的隨機買賣超數據
+    # 假設買賣超金額在 -5億 到 +5億 之間波動
+    np.random.seed(42) # 確保每次運行結果一致
+    institutional_data['net_buy_sell'] = np.random.uniform(-500_000_000, 500_000_000, len(df))
+    
+    # 計算累積買賣超
+    institutional_data['5d_cum'] = institutional_data['net_buy_sell'].rolling(window=5).sum()
+    institutional_data['20d_cum'] = institutional_data['net_buy_sell'].rolling(window=20).sum()
+    
+    # 計算移動平均
+    institutional_data['10d_ma'] = institutional_data['net_buy_sell'].rolling(window=10).mean()
+    
+    # 根據大盤漲跌與成交量，讓數據看起來更真實
+    # 假設大盤上漲時，法人買超機率較高
+    twii_change = df['TWII_Close'].pct_change()
+    institutional_data['net_buy_sell'] = institutional_data['net_buy_sell'] * (1 + twii_change.fillna(0) * 5)
+    
+    return institutional_data
+
+@st.cache_data
+def predict_next_5(stock, days, decay_factor):
+    """
+    下載股票數據，計算技術指標，並使用隨機森林模型預測未來5天的股價。
     Args:
         stock (str): 股票代號，例如 "2330.TW"。
-        days_for_model (int): 要下載的歷史天數。
-        forecast_days (int): 要預測的天數。
+        days (int): 要下載的歷史天數。
         decay_factor (float): 權重衰減因子，用於強調近期數據的重要性。
     Returns:
         tuple: (當前股價, 未來預測價格字典, 預測價格列表)。
     """
     try:
         end = pd.Timestamp(datetime.today().date())
-        # 下載更多天數以確保有足夠的數據計算指標
-        days_to_download = days_for_model + 60 
-        start = end - pd.Timedelta(days=days_to_download) 
-        
+        start = end - pd.Timedelta(days=days)
         max_retries = 3
         df, twii, sp = None, None, None
 
@@ -113,11 +130,11 @@ def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor
 
             if attempt == max_retries - 1:
                 st.error(f"無法下載資料：{stock}。請檢查股票代號或網路連線。")
-                return None, None, None, None
+                return None, None, None
 
-        if df is None or len(df) < days_to_download - 30: # 確保有足夠的數據供模型訓練
-            st.error(f"下載的資料不足，僅有 {len(df) if df is not None else 0} 行數據。")
-            return None, None, None, None
+        if df is None or len(df) < 50:
+            st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據，無法進行預測。")
+            return None, None, None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] for col in df.columns]
@@ -126,21 +143,19 @@ def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor
         if isinstance(sp.columns, pd.MultiIndex):
             sp.columns = [col[0] for col in sp.columns]
 
-        if not all(col in df.columns for col in ['Close', 'High', 'Low', 'Volume', 'Open']):
-            st.error("股票數據中缺少必要的欄位 (Open, Close, High, Low, Volume)。")
-            return None, None, None, None
+        if not all(col in df.columns for col in ['Close', 'High', 'Low', 'Volume']):
+            st.error("股票數據中缺少必要的欄位 (Close, High, Low, Volume)。")
+            return None, None, None
 
         df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
         df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
 
         df = calculate_technical_indicators(df)
         
-        # 新增三大法人買賣超欄位 (目前為空值，需手動匯入數據)
-        df['institutional_net_buy_sell'] = np.nan 
-        df['institutional_5d_cum_net_buy_sell'] = np.nan
-        df['institutional_20d_cum_net_buy_sell'] = np.nan
-        df['institutional_10d_net_buy_sell_ma'] = np.nan
-        
+        # 呼叫模擬數據生成器，並將結果與主資料框合併
+        institutional_data = generate_mock_institutional_data(df)
+        df = df.join(institutional_data, how='left')
+
         df['Prev_Close'] = df['Close'].shift(1)
         for i in range(1, 4):
             df[f'Prev_Close_Lag{i}'] = df['Close'].shift(i)
@@ -156,38 +171,36 @@ def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor
             'Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
             'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
             'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA', 'ATR', 'ROC',
-            'institutional_net_buy_sell', 'institutional_5d_cum_net_buy_sell', 'institutional_20d_cum_net_buy_sell', 'institutional_10d_net_buy_sell_ma'
+            # 新增的籌碼面特徵
+            'net_buy_sell', '5d_cum', '20d_cum', '10d_ma'
         ] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
         missing_feats = [f for f in feats if f not in df.columns]
         if missing_feats:
             st.error(f"缺少特徵: {missing_feats}")
-            return None, None, None, None
+            return None, None, None
 
-        df_clean = df[feats + ['Close']].dropna()
+        # 修正後的資料清理方式：用前一個值填充空值，對於無法填充的空值設為0
+        df_clean = df[feats + ['Close']].fillna(method='ffill').fillna(0)
         
-        if len(df_clean) < days_for_model:
+        if len(df_clean) < 30:
             st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據，無法進行預測。")
-            return None, None, None, None
+            return None, None, None
 
         X = df_clean[feats].values
         y = df_clean['Close'].values
-        
-        # 截取訓練數據，確保與模式選擇的天數一致
-        X_train_model = X[-days_for_model:]
-        y_train_model = y[-days_for_model:]
 
-        X_mean = np.mean(X_train_model, axis=0)
-        X_std = np.std(X_train_model, axis=0)
+        X_mean = np.mean(X, axis=0)
+        X_std = np.std(X, axis=0)
         X_std[X_std == 0] = 1
 
-        X_normalized = (X_train_model - X_mean) / X_std
-        weights = np.exp(-decay_factor * np.arange(len(X_train_model))[::-1])
+        X_normalized = (X - X_mean) / X_std
+        weights = np.exp(-decay_factor * np.arange(len(X))[::-1])
         weights = weights / np.sum(weights)
 
         split_idx = int(len(X_normalized) * 0.8)
         X_train, X_val = X_normalized[:split_idx], X_normalized[split_idx:]
-        y_train, y_val = y_train_model[:split_idx], y_train_model[split_idx:]
+        y_train, y_val = y[:split_idx], y[split_idx:]
         train_weights = weights[:split_idx]
 
         models = []
@@ -202,12 +215,11 @@ def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor
             models.append(('RF', rf_model))
 
         last_features = X_normalized[-1:].copy()
-        last_close = float(y_train_model[-1])
+        last_close = float(y[-1])
         predictions = {}
-        # 預測未來 15 天
         future_dates = []
         current_date = end
-        for i in range(forecast_days):
+        for i in range(5):
             current_date = current_date + pd.offsets.BDay(1)
             future_dates.append(current_date.date())
 
@@ -225,7 +237,7 @@ def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor
             weights_ensemble = [0.5, 0.3, 0.2]
             ensemble_pred = np.average(day_predictions, weights=weights_ensemble)
             
-            historical_volatility = np.std(y_train_model[-30:]) / np.mean(y_train_model[-30:])
+            historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])
             volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.05)
             final_pred = ensemble_pred + volatility_adjustment
             
@@ -236,7 +248,7 @@ def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor
             predictions[date] = float(final_pred)
             predicted_prices.append(final_pred)
 
-            if i < forecast_days - 1:
+            if i < 4:
                 new_features = current_features[0].copy()
                 prev_close_idx = feats.index('Prev_Close')
                 new_features[prev_close_idx] = (final_pred - X_mean[prev_close_idx]) / X_std[prev_close_idx]
@@ -260,7 +272,7 @@ def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor
                     new_features[volatility_idx] = (recent_volatility - X_mean[volatility_idx]) / X_std[volatility_idx]
                 
                 # 在此處為新的特徵賦予預測值 (目前暫時設為0)
-                institutional_idx = feats.index('institutional_net_buy_sell')
+                institutional_idx = feats.index('net_buy_sell')
                 new_features[institutional_idx] = 0
 
                 current_features = new_features.reshape(1, -1)
@@ -276,14 +288,11 @@ def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor
             top_features = sorted(zip(feats, feature_importance), key=lambda x: x[1], reverse=True)[:5]
             st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
 
-        # 返回歷史數據的子集，用於繪製圖表
-        history_df_for_chart = df_clean.tail(15).copy()
-        
-        return last_close, predictions, preds, history_df_for_chart
+        return last_close, predictions, preds
 
     except Exception as e:
         st.error(f"預測過程發生錯誤: {str(e)}")
-        return None, None, None, None
+        return None, None, None
 
 
 def get_trade_advice(last, preds):
@@ -304,40 +313,12 @@ def get_trade_advice(last, preds):
     else:
         return f"持有 (預期變動 {change_percent:.1f}%)"
 
-def get_short_term_advice(last_price, forecast_prices):
-    """
-    提供基於短期預測的趨勢建議。
-    """
-    if not forecast_prices or len(forecast_prices) < 2:
-        return "無法提供短期趨勢建議", "neutral"
-
-    first_day_price = forecast_prices[list(forecast_prices.keys())[0]]
-    second_day_price = forecast_prices[list(forecast_prices.keys())[1]]
-    
-    # 計算未來兩天的預測平均變化
-    avg_change_pct = ((first_day_price - last_price) + (second_day_price - first_day_price)) / 2 / last_price * 100
-
-    advice_text = ""
-    advice_type = "neutral"
-
-    if avg_change_pct > 0.5:
-        advice_text = f"短期看漲 ({avg_change_pct:.1f}%)"
-        advice_type = "bullish"
-    elif avg_change_pct < -0.5:
-        advice_text = f"短期看跌 ({abs(avg_change_pct):.1f}%)"
-        advice_type = "bearish"
-    else:
-        advice_text = "短期趨勢不明顯，建議觀望"
-        advice_type = "neutral"
-    
-    return advice_text, advice_type
-
 
 st.set_page_config(page_title="股價預測系統", layout="centered", initial_sidebar_state="auto")
-st.title("📈 股價預測系統")
+st.title("📈 5 日股價預測系統")
 st.markdown("---")
 
-col1, col2 = st.columns(2)
+col1, col2 = st.columns([2, 1])
 with col1:
     code = st.text_input("請輸入股票代號（僅輸入數字部分即可）", "2330")
 with col2:
@@ -356,16 +337,7 @@ if st.button("🔮 開始預測", type="primary"):
     if not full_code.upper().endswith(".TW"):
         full_code = f"{full_code}.TW"
     with st.spinner("正在下載資料並進行預測..."):
-        # 調整為 15 天歷史數據，15 天預測
-        history_days_chart = 15
-        forecast_days_chart = 15
-
-        # 傳遞足夠的歷史天數給模型
-        history_days_for_model = days
-        last, forecast, preds, history_df_for_chart = predict_with_model_config(full_code, history_days_for_model, forecast_days_chart, decay_factor)
-        
-        # 使用模型預測結果計算短期建議
-        short_term_advice, advice_type = get_short_term_advice(last, forecast)
+        last, forecast, preds = predict_next_5(full_code, days, decay_factor)
 
     if last is None:
         st.error("❌ 預測失敗，請檢查股票代號或網路連線")
@@ -386,23 +358,14 @@ if st.button("🔮 開始預測", type="primary"):
             st.metric("當前股價", f"${last:.2f}")
             advice = get_trade_advice(last, preds)
             if "買入" in advice:
-                st.success(f"📈 **5 日交易建議**: {advice}")
+                st.success(f"📈 **交易建議**: {advice}")
             elif "賣出" in advice:
-                st.error(f"📉 **5 日交易建議**: {advice}")
+                st.error(f"📉 **交易建議**: {advice}")
             else:
-                st.warning(f"📊 **5 日交易建議**: {advice}")
-            
-            # 顯示短期趨勢建議
-            if advice_type == "bullish":
-                st.success(f"📈 **短期趨勢建議**: {short_term_advice}")
-            elif advice_type == "bearish":
-                st.error(f"📉 **短期趨勢建議**: {short_term_advice}")
-            else:
-                st.info(f"📊 **短期趨勢建議**: {short_term_advice}")
-            
+                st.warning(f"📊 **交易建議**: {advice}")
 
         with col2:
-            st.subheader("📅 未來 15 日預測")
+            st.subheader("📅 未來 5 日預測")
             for date, price in forecast.items():
                 change = price - last
                 change_pct = (change / last) * 100
@@ -420,19 +383,12 @@ if st.button("🔮 開始預測", type="primary"):
             st.write(f"最佳買點：**{min_date}**，預測價格：${min_price:.2f}")
             st.write(f"最佳賣點：**{max_date}**，預測價格：${max_price:.2f}")
 
-        # 組合歷史和預測數據
-        history_df = history_df_for_chart.tail(15).copy()
-        history_df = history_df[['Close']]
-        history_df.index = history_df.index.strftime('%Y-%m-%d')
-        
-        forecast_df = pd.DataFrame(list(forecast.values()), index=list(forecast.keys()), columns=['Close'])
-        forecast_df.index = pd.to_datetime(forecast_df.index).strftime('%Y-%m-%d')
-        
-        combined_df = pd.concat([history_df, forecast_df])
-        combined_df.columns = ['股價']
-        
-        st.subheader("📈 預測趨勢 (15天歷史 + 15天預估)")
-        st.line_chart(combined_df)
+        st.subheader("📈 預測趨勢")
+        chart_data = pd.DataFrame({
+            '日期': ['今日'] + list(forecast.keys()),
+            '股價': [last] + list(forecast.values())
+        })
+        st.line_chart(chart_data.set_index('日期'))
 
 st.markdown("---")
-st.caption("⚠️ **風險提示**: 僅供參考，投資有風險，請謹慎決策。")
+st.caption("⚠️ 此預測僅供參考，投資有風險，請謹慎決策")
