@@ -8,6 +8,21 @@ import ta
 from datetime import datetime, timedelta
 import time
 
+# 股票名稱映射字典（這部分可以擴展，添加更多對應）
+stock_name_dict = {
+    "2330.TW": "台積電",
+    "AAPL": "蘋果",
+    "GOOG": "谷歌",
+    "MSFT": "微軟",
+    # 這裡可以添加更多股票的映射
+}
+
+# 查詢股票名稱的函式
+def get_stock_name(stock_code):
+    # 如果輸入的是代號，返回對應的名稱
+    stock_code = stock_code.strip().upper()
+    return stock_name_dict.get(stock_code, "未知股票代號")
+
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
     try:
@@ -227,10 +242,16 @@ st.markdown("---")
 # 輸入區域
 col1, col2 = st.columns([2, 1])
 with col1:
-    code = st.text_input("請輸入股票代號", "2330.TW", help="例如：2330.TW (台積電)、AAPL (蘋果)")
+    stock_input = st.text_input("請輸入股票代號或名稱", "2330.TW", help="例如：2330.TW (台積電)、AAPL (蘋果)")
 
 with col2:
     mode = st.selectbox("預測模式", ["中期模式", "短期模式", "長期模式"])
+
+# 根據股票代號查詢股票名稱
+stock_name = get_stock_name(stock_input.strip())
+
+# 顯示選擇的股票名稱
+st.info(f"您選擇的股票是: {stock_name}")
 
 # 模式說明
 mode_info = {
@@ -244,7 +265,7 @@ days, decay_factor = mode_info[mode][1], mode_info[mode][2]
 
 if st.button("🔮 開始預測", type="primary"):
     with st.spinner("正在下載資料並進行預測..."):
-        last, forecast, preds = predict_next_5(code.strip().upper(), days, decay_factor)
+        last, forecast, preds = predict_next_5(stock_input.strip().upper(), days, decay_factor)
     
     if last is None:
         st.error("❌ 預測失敗，請檢查股票代號或網路連線")
