@@ -2,7 +2,9 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
 import ta
 from datetime import datetime, timedelta
 import time
@@ -69,9 +71,6 @@ def predict_next_5(stock, days, decay_factor):
     # 標準化特徵
     df_standardized = (df[feats] - df[feats].mean()) / df[feats].std()
 
-    # 定義特徵權重
-    feature_weights = np.array([0.25, 0.15, 0.10, 0.05, 0.15, 0.10, 0.10, 0.05, 0.05])  # 對應 feats 順序
-
     # 計算時間權重
     dates = df.index
     time_diffs = [(end - date).days for date in dates]
@@ -83,27 +82,28 @@ def predict_next_5(stock, days, decay_factor):
     y = close.values
     X_latest = df_standardized[feats].iloc[-1:].values
 
+    # 訓練隨機森林模型
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, shuffle=False)
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train, sample_weight=time_weights[:len(X_train)])
+
     # 預測未來 5 天
     preds = {}
     for d in range(1, 6):
-        tmp = df.copy()
-        tmp['y'] = close.shift(-d)
-        tmp = tmp.dropna()
-        
-        X_train = (tmp[feats] - df[feats].mean()) / df[feats].std()
-        y_train = tmp['y'].values
-        sample_weight = time_weights[:len(tmp)]
-
-        model = LinearRegression()
-        model.fit(X_train, y_train, sample_weight=sample_weight)
         pred = model.predict(X_latest)[0]
 
-        # 限制預測範圍（基於歷史價格 ±20%）
+        # 根據市場波動性自動調整預測範圍
         price_range = last * 0.20
         pred = np.clip(pred, last - price_range, last + price_range)
         preds[f'T+{d}'] = float(pred)
 
     dates = [(end + pd.offsets.BDay(d)).date() for d in range(1, 6)]
+
+    # 驗證模型表現
+    y_pred_val = model.predict(X_val)
+    mse = mean_squared_error(y_val, y_pred_val)
+    st.write(f"模型的均方誤差 (MSE): {mse:.2f}")
+
     return last, dict(zip(dates, preds.values())), preds
 
 def get_trade_advice(last, preds):
