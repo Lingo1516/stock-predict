@@ -9,8 +9,9 @@ import time
 
 @st.cache_data
 def predict_next_5(stock, days=400, decay_factor=0.005):
-    end = datetime.today().date()
-    start = end - timedelta(days=days)
+    # 設定起止日期
+    end = pd.Timestamp(datetime.today().date())  # 轉為 Timestamp 與 df.index 匹配
+    start = end - pd.Timedelta(days=days)
 
     # 嘗試下載資料，添加重試邏輯
     max_retries = 3
@@ -37,6 +38,7 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
     # 確保 close 是一維
     close = df['Close'] if isinstance(df['Close'], pd.Series) else df['Close'].iloc[:, 0]
 
+    # 填充 TWII 和 SP500 收盤價
     df['TWII_Close'] = twii['Close'].reindex(df.index).ffill()
     df['SP500_Close'] = sp['Close'].reindex(df.index).ffill()
 
@@ -49,6 +51,7 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
     df['MACD_Signal'] = macd.macd_signal()
     df['Prev_Close'] = close.shift(1)
 
+    # 定義特徵
     feats = ['Prev_Close', 'MA10', 'MA20', 'Volume', 'RSI', 'MACD', 'MACD_Signal', 'TWII_Close', 'SP500_Close']
     
     # 檢查特徵是否存在
@@ -57,6 +60,7 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
         st.error(f"缺少的特徵: {missing_feats}")
         return None, None, None
 
+    # 移除缺失值
     df = df.dropna()
     if len(df) < 30:
         st.error(f"資料不足，僅有 {len(df)} 行數據")
@@ -77,7 +81,10 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
 
     # 計算基於日期的時間權重
     dates = df.index
-    time_diffs = [(end - date).days for date in dates]
+    if not isinstance(dates, pd.DatetimeIndex):
+        st.error("索引不是有效的日期格式")
+        return None, None, None
+    time_diffs = [(end - date).days for date in dates]  # 計算與當前日期的差異（天）
     time_weights = np.array([np.exp(-decay_factor * diff) for diff in time_diffs])
     time_weights = time_weights / np.sum(time_weights)  # 正規化
 
@@ -91,6 +98,7 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
     for i, feat in enumerate(feats):
         X_latest[:, i] *= feature_weights[feat]
 
+    # 預測未來 5 天
     preds = {}
     for d in range(1, 6):
         tmp = df.copy()
@@ -114,6 +122,7 @@ def get_trade_advice(last, preds):
     avg_change = np.mean(price_changes)
     return "買" if avg_change > 0 else "賣"
 
+# Streamlit 介面
 st.title("📈 5 日股價預測")
 code = st.text_input("股票代號", "3714.TW")
 days = st.slider("歷史數據天數", 100, 500, 400, step=50)
