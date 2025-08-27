@@ -122,7 +122,7 @@ def parse_stock_input(user_input, stock_dict):
     return None, None
 
 @st.cache_data
-def predict_next_5(stock_input, stock_list, days, decay_factor):
+def predict_next_5(stock_input, days, decay_factor):
     """股價預測主函數"""
     try:
         # 獲取股票清單
@@ -175,7 +175,7 @@ with col2:
 
 if st.button("🔮 開始預測", type="primary"):
     with st.spinner("📥 正在下載資料並進行預測..."):
-        last, forecast, preds, stock_name = predict_next_5(stock_input.strip(), None, 100, 0.005)
+        last, forecast, preds, stock_name = predict_next_5(stock_input.strip(), 100, 0.005)
     
     if last is None:
         st.error("❌ 預測失敗，請檢查股票輸入或網路連線")
