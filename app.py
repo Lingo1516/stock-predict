@@ -33,7 +33,19 @@ def get_stock_name(stock_code):
 # 根據股票名稱獲取股票代號
 def get_stock_code(stock_name):
     stock_name = stock_name.strip()
-    return stock_name_to_code.get(stock_name, stock_name)
+    # 嘗試從字典中查找中文名稱的代號
+    code = stock_name_to_code.get(stock_name, None)
+    
+    if not code:
+        try:
+            # 嘗試從 Yahoo Finance 查找股票名稱對應的代號
+            stock = yf.Ticker(stock_name)
+            info = stock.info
+            if info.get('symbol'):
+                return info['symbol']  # 返回正確的股票代號
+        except:
+            pass
+    return code if code else stock_name  # 若無法找到，返回原始名稱
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
