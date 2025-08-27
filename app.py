@@ -56,6 +56,9 @@ def predict_next_5(stock, days, decay_factor):
     for i in range(1, 6):
         df[f'Prev_Close_Lag{i}'] = close.shift(i)
 
+    # 加入成交量特徵來捕捉波動性
+    df['Volume'] = df['Volume'].shift(1)  # 使用前一天的成交量
+
     feats = ['Prev_Close', 'MA10', 'MA20', 'Volume', 'RSI', 'MACD', 'MACD_Signal', 'TWII_Close', 'SP500_Close'] + [f'Prev_Close_Lag{i}' for i in range(1, 6)]
     
     # 檢查特徵
@@ -98,7 +101,7 @@ def predict_next_5(stock, days, decay_factor):
 
     # 訓練隨機森林模型
     X_train, X_val, y_train, y_val = train_test_split(X_cleaned, y_cleaned, test_size=0.2, shuffle=False)
-    model = RandomForestRegressor(n_estimators=200, max_depth=10, random_state=42)
+    model = RandomForestRegressor(n_estimators=500, max_depth=15, random_state=42)  # 增加樹的數量，設置深度
     model.fit(X_train, y_train, sample_weight=time_weights[:len(X_train)])
 
     # 預測未來 5 天
