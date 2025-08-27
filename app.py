@@ -8,6 +8,15 @@ import ta
 from datetime import datetime, timedelta
 import time
 
+# 股票名稱到代號的映射字典（可擴展更多股票名稱）
+stock_name_to_code = {
+    "台積電": "2330.TW",
+    "蘋果": "AAPL",
+    "谷歌": "GOOG",
+    "微軟": "MSFT",
+    # 你可以根據需求添加更多股票
+}
+
 # 查詢股票名稱的函式
 def get_stock_name(stock_code):
     stock_code = stock_code.strip().upper()
@@ -21,16 +30,19 @@ def get_stock_name(stock_code):
         st.error(f"無法獲取股票名稱：{e}")
         return None
 
+# 根據股票名稱獲取股票代號
+def get_stock_code(stock_name):
+    stock_name = stock_name.strip()
+    return stock_name_to_code.get(stock_name, stock_name)
+
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
     try:
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
 
-        # 確保股票代號是有效格式
-        stock_code = stock.strip().upper()
-        if not stock_code.endswith('.TW'):
-            stock_code += '.TW'  # 如果沒有 .TW，則自動補充
+        # 根據股票名稱取得代號
+        stock_code = get_stock_code(stock.strip())
 
         # 下載資料並添加錯誤處理
         max_retries = 3
@@ -245,7 +257,7 @@ st.markdown("---")
 # 輸入區域
 col1, col2 = st.columns([2, 1])
 with col1:
-    stock_input = st.text_input("請輸入股票代號或名稱", "2330", help="例如：2330 (台積電)、AAPL (蘋果)")
+    stock_input = st.text_input("請輸入股票代號或名稱", "台積電", help="例如：2330 (台積電)、AAPL (蘋果)")
 
 with col2:
     mode = st.selectbox("預測模式", ["中期模式", "短期模式", "長期模式"])
