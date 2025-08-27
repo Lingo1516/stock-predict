@@ -8,6 +8,14 @@ import ta
 from datetime import datetime
 import time
 
+# 股票代號到中文名稱簡易對照字典，可擴充
+stock_name_dict = {
+    "2330.TW": "台灣積體電路製造股份有限公司",
+    "2317.TW": "鴻海精密工業股份有限公司",
+    "2412.TW": "中華電信股份有限公司",
+    # 更多可自行加入
+}
+
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
     try:
@@ -202,6 +210,7 @@ def get_trade_advice(last, preds):
     else:
         return f"持有 (預期變動 {change_percent:.1f}%)"
 
+
 # Streamlit UI
 st.title("📈 5 日股價預測系統")
 st.markdown("---")
@@ -232,13 +241,14 @@ if st.button("🔮 開始預測", type="primary"):
     else:
         st.success("✅ 預測完成！")
 
-        # 抓取並顯示股票中文名稱
+        # 取得並顯示中文及英文名稱
         try:
             ticker_info = yf.Ticker(full_code).info
             company_name = ticker_info.get('shortName') or ticker_info.get('longName') or "無法取得名稱"
         except Exception:
             company_name = "無法取得名稱"
-        st.write(f"📌 股票名稱：**{company_name}**")
+        ch_name = stock_name_dict.get(full_code, "無中文名稱")
+        st.write(f"📌 股票名稱：**{ch_name} ({company_name})**")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -260,6 +270,16 @@ if st.button("🔮 開始預測", type="primary"):
                     st.write(f"**{date}**: ${price:.2f} (+{change:.2f}, +{change_pct:.1f}%)")
                 else:
                     st.write(f"**{date}**: ${price:.2f} ({change:.2f}, {change_pct:.1f}%)")
+
+            # 顯示最佳買賣點日期與價格
+            min_date = min(forecast, key=forecast.get)
+            min_price = forecast[min_date]
+            max_date = max(forecast, key=forecast.get)
+            max_price = forecast[max_date]
+
+            st.markdown("### 📌 預測期間最佳買賣點")
+            st.write(f"最佳買點：**{min_date}**，預測價格：${min_price:.2f}")
+            st.write(f"最佳賣點：**{max_date}**，預測價格：${max_price:.2f}")
 
         st.subheader("📈 預測趨勢")
         chart_data = pd.DataFrame({
