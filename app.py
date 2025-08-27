@@ -44,7 +44,7 @@ def get_stock_code(stock_name, stock_list):
         st.error(f"無法找到股票代號：{stock_name}")
         return None
 
-# 獲取股票名稱
+# 根據股票代號獲取股票名稱
 def get_stock_name(stock_code):
     stock_code = stock_code.strip().upper()
     if not stock_code.endswith('.TW'):
@@ -56,6 +56,14 @@ def get_stock_name(stock_code):
     except Exception as e:
         st.error(f"無法獲取股票名稱：{e}")
         return None
+
+# 處理用戶輸入，若為純數字代號，將其補全為 .TW
+def format_stock_input(stock_input):
+    stock_input = stock_input.strip()
+    # 如果是數字代號，補全 .TW
+    if stock_input.isdigit():
+        stock_input = stock_input + ".TW"
+    return stock_input
 
 # 下載股票資料
 def download_stock_data(stock_name, stock_list, start_date, end_date):
