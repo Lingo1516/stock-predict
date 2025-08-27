@@ -8,7 +8,9 @@ import ta
 from datetime import datetime
 import time
 from ta.volatility import BollingerBands
-from ta.trend import ADXIndicator
+from ta.trend import ADXIndicator, CCIIndicator
+from ta.momentum import StochasticOscillator
+from ta.volume import OnBalanceVolume
 
 # 股票代號到中文名稱簡易對照字典，可自行擴充
 stock_name_dict = {
@@ -19,20 +21,30 @@ stock_name_dict = {
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
+    """
+    下載股票數據，計算技術指標，並使用隨機森林模型預測未來5天的股價。
+    Args:
+        stock (str): 股票代號，例如 "2330.TW"。
+        days (int): 要下載的歷史天數。
+        decay_factor (float): 權重衰減因子，用於強調近期數據的重要性。
+    Returns:
+        tuple: (當前股價, 未來預測價格字典, 預測價格列表)。
+    """
     try:
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
         max_retries = 3
         df, twii, sp = None, None, None
 
+        # 嘗試下載資料，最多重試3次
         for attempt in range(max_retries):
             try:
                 df = yf.download(stock, start=start, end=end + pd.Timedelta(days=1),
                                  interval="1d", auto_adjust=True, progress=False)
                 twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1),
-                                  interval="1d", auto_adjust=True, progress=False)
+                                   interval="1d", auto_adjust=True, progress=False)
                 sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1),
-                                interval="1d", auto_adjust=True, progress=False)
+                                 interval="1d", auto_adjust=True, progress=False)
                 if not (df.empty or twii.empty or sp.empty):
                     break
             except Exception as e:
@@ -40,13 +52,14 @@ def predict_next_5(stock, days, decay_factor):
                 time.sleep(2)
 
             if attempt == max_retries - 1:
-                st.error(f"無法下載資料：{stock}")
+                st.error(f"無法下載資料：{stock}。請檢查股票代號或網路連線。")
                 return None, None, None
 
         if df is None or len(df) < 50:
-            st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據")
+            st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據，無法進行預測。")
             return None, None, None
 
+        # 處理資料框架欄位名稱
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] for col in df.columns]
         if isinstance(twii.columns, pd.MultiIndex):
@@ -54,42 +67,61 @@ def predict_next_5(stock, days, decay_factor):
         if isinstance(sp.columns, pd.MultiIndex):
             sp.columns = [col[0] for col in sp.columns]
 
-        close = df['Close'].squeeze() if 'Close' in df.columns else df.iloc[:, 3].squeeze()
+        # 確保 'Close', 'High', 'Low' 欄位存在
+        if not all(col in df.columns for col in ['Close', 'High', 'Low']):
+            st.error("股票數據中缺少必要的欄位 (Close, High, Low)。")
+            return None, None, None
+
+        close = df['Close'].squeeze()
+        
+        # 整合市場指數
         df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
         df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
 
+        # === 核心技術指標計算 ===
+        # 移動平均線
+        df['MA5'] = close.rolling(5, min_periods=1).mean()
         df['MA10'] = close.rolling(10, min_periods=1).mean()
         df['MA20'] = close.rolling(20, min_periods=1).mean()
-        df['MA5'] = close.rolling(5, min_periods=1).mean()
 
-        try:
-            df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
-        except:
-            delta = close.diff()
-            gain = delta.where(delta > 0, 0).rolling(14, min_periods=1).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=1).mean()
-            rs = gain / loss
-            df['RSI'] = 100 - (100 / (1 + rs))
-
-        try:
-            macd = ta.trend.MACD(close)
-            df['MACD'] = macd.macd()
-            df['MACD_Signal'] = macd.macd_signal()
-        except:
-            ema12 = close.ewm(span=12).mean()
-            ema26 = close.ewm(span=26).mean()
-            df['MACD'] = ema12 - ema26
-            df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
-
-        # 新增布林帶指標
+        # 相對強弱指標 (RSI)
+        df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
+        
+        # 移動平均收斂散度 (MACD)
+        macd = ta.trend.MACD(close)
+        df['MACD'] = macd.macd()
+        df['MACD_Signal'] = macd.macd_signal()
+        
+        # 布林帶 (Bollinger Bands)
         bb_indicator = BollingerBands(close, window=20, window_dev=2)
         df['BB_High'] = bb_indicator.bollinger_hband()
         df['BB_Low'] = bb_indicator.bollinger_lband()
-
-        # 新增ADX指標
+        
+        # 平均趨向指標 (ADX)
         adx_indicator = ADXIndicator(df['High'], df['Low'], close, window=14)
         df['ADX'] = adx_indicator.adx()
+        
+        # === 新增技術指標 ===
+        # 隨機指標 (Stochastic Oscillator)
+        stoch = StochasticOscillator(high=df['High'], low=df['Low'], close=close, window=14, smooth_window=3)
+        df['STOCH_K'] = stoch.stoch()
+        df['STOCH_D'] = stoch.stoch_signal()
 
+        # 商品通道指標 (CCI)
+        cci = CCIIndicator(high=df['High'], low=df['Low'], close=close, window=20)
+        df['CCI'] = cci.cci()
+
+        # 能量潮 (On-Balance Volume)
+        if 'Volume' in df.columns and not df['Volume'].isnull().all():
+            obv = OnBalanceVolume(close, df['Volume'])
+            df['OBV'] = obv.on_balance_volume()
+            # 增加OBV的移動平均作為趨勢特徵
+            df['OBV_MA'] = df['OBV'].rolling(10, min_periods=1).mean()
+        else:
+            df['OBV'] = 0
+            df['OBV_MA'] = 0
+
+        # === 其他特徵 ===
         df['Prev_Close'] = close.shift(1)
         for i in range(1, 4):
             df[f'Prev_Close_Lag{i}'] = close.shift(i)
@@ -101,10 +133,14 @@ def predict_next_5(stock, days, decay_factor):
 
         df['Volatility'] = close.rolling(10, min_periods=1).std()
 
-        feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
-                 'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
-                 'BB_Low', 'ADX'] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
-
+        # === 定義特徵集 ===
+        feats = [
+            'Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
+            'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
+            'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA'
+        ] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
+        
+        # 檢查是否有缺失的特徵
         missing_feats = [f for f in feats if f not in df.columns]
         if missing_feats:
             st.error(f"缺少特徵: {missing_feats}")
@@ -112,60 +148,40 @@ def predict_next_5(stock, days, decay_factor):
 
         df_clean = df[feats + ['Close']].dropna()
         if len(df_clean) < 30:
-            st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據")
+            st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據，無法進行預測。")
             return None, None, None
 
         X = df_clean[feats].values
         y = df_clean['Close'].values
 
+        # 資料正規化
         X_mean = np.mean(X, axis=0)
         X_std = np.std(X, axis=0)
-        X_std[X_std == 0] = 1  # 防止除以0
+        X_std[X_std == 0] = 1 # 防止除以0
 
         X_normalized = (X - X_mean) / X_std
         weights = np.exp(-decay_factor * np.arange(len(X))[::-1])
         weights = weights / np.sum(weights)
 
+        # 訓練/驗證資料分割
         split_idx = int(len(X_normalized) * 0.8)
         X_train, X_val = X_normalized[:split_idx], X_normalized[split_idx:]
         y_train, y_val = y[:split_idx], y[split_idx:]
         train_weights = weights[:split_idx]
 
+        # 建立並訓練隨機森林模型
         models = []
+        model_params = [
+            {'n_estimators': 100, 'max_depth': 10, 'min_samples_split': 5, 'min_samples_leaf': 2, 'random_state': 42},
+            {'n_estimators': 80, 'max_depth': 8, 'min_samples_split': 3, 'min_samples_leaf': 1, 'random_state': 123},
+            {'n_estimators': 120, 'max_depth': 12, 'min_samples_split': 7, 'min_samples_leaf': 3, 'random_state': 456}
+        ]
+        for params in model_params:
+            rf_model = RandomForestRegressor(**params, n_jobs=-1)
+            rf_model.fit(X_train, y_train, sample_weight=train_weights)
+            models.append(('RF', rf_model))
 
-        rf_model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_split=5,
-            min_samples_leaf=2,
-            random_state=42,
-            n_jobs=-1
-        )
-        rf_model.fit(X_train, y_train, sample_weight=train_weights)
-        models.append(('RF', rf_model))
-
-        rf_model2 = RandomForestRegressor(
-            n_estimators=80,
-            max_depth=8,
-            min_samples_split=3,
-            min_samples_leaf=1,
-            random_state=123,
-            n_jobs=-1
-        )
-        rf_model2.fit(X_train, y_train, sample_weight=train_weights)
-        models.append(('RF2', rf_model2))
-
-        rf_model3 = RandomForestRegressor(
-            n_estimators=120,
-            max_depth=12,
-            min_samples_split=7,
-            min_samples_leaf=3,
-            random_state=456,
-            n_jobs=-1
-        )
-        rf_model3.fit(X_train, y_train, sample_weight=train_weights)
-        models.append(('RF3', rf_model3))
-
+        # 進行未來5天股價預測
         last_features = X_normalized[-1:].copy()
         last_close = float(y[-1])
         predictions = {}
@@ -177,24 +193,22 @@ def predict_next_5(stock, days, decay_factor):
 
         current_features = last_features.copy()
         predicted_prices = [last_close]
-
-        max_deviation_pct = 0.10  # 最大偏離限制 ±10%
+        max_deviation_pct = 0.10 # 最大偏離限制 ±10%
 
         for i, date in enumerate(future_dates):
             day_predictions = []
             for model_name, model in models:
                 pred = model.predict(current_features)[0]
-                variation = np.random.normal(0, pred * 0.002)  # 隨機變異降至0.2%
+                variation = np.random.normal(0, pred * 0.002)
                 day_predictions.append(pred + variation)
 
             weights_ensemble = [0.5, 0.3, 0.2]
             ensemble_pred = np.average(day_predictions, weights=weights_ensemble)
-
+            
             historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])
-            volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.05)  # 調整到0.05
-
+            volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.05)
             final_pred = ensemble_pred + volatility_adjustment
-
+            
             # 限制預測價格在合理範圍內
             upper_limit = last_close * (1 + max_deviation_pct)
             lower_limit = last_close * (1 - max_deviation_pct)
@@ -203,11 +217,13 @@ def predict_next_5(stock, days, decay_factor):
             predictions[date] = float(final_pred)
             predicted_prices.append(final_pred)
 
+            # 更新特徵用於下一天的預測
             if i < 4:
                 new_features = current_features[0].copy()
                 prev_close_idx = feats.index('Prev_Close')
                 new_features[prev_close_idx] = (final_pred - X_mean[prev_close_idx]) / X_std[prev_close_idx]
 
+                # 更新滯後特徵
                 for j in range(1, min(4, len(predicted_prices))):
                     if f'Prev_Close_Lag{j}' in feats:
                         lag_idx = feats.index(f'Prev_Close_Lag{j}')
@@ -215,16 +231,14 @@ def predict_next_5(stock, days, decay_factor):
                             lag_price = predicted_prices[-(j + 1)]
                             new_features[lag_idx] = (lag_price - X_mean[lag_idx]) / X_std[lag_idx]
 
-                if 'MA5' in feats and len(predicted_prices) >= 2:
-                    ma5_idx = feats.index('MA5')
-                    recent_ma5 = np.mean(predicted_prices[-min(5, len(predicted_prices)):])
-                    new_features[ma5_idx] = (recent_ma5 - X_mean[ma5_idx]) / X_std[ma5_idx]
-
-                if 'MA10' in feats and len(predicted_prices) >= 2:
-                    ma10_idx = feats.index('MA10')
-                    recent_ma10 = np.mean(predicted_prices[-min(10, len(predicted_prices)):])
-                    new_features[ma10_idx] = (recent_ma10 - X_mean[ma10_idx]) / X_std[ma10_idx]
-
+                # 更新移動平均線
+                for ma in [5, 10]:
+                    if f'MA{ma}' in feats and len(predicted_prices) >= ma + 1:
+                        ma_idx = feats.index(f'MA{ma}')
+                        recent_ma = np.mean(predicted_prices[-min(ma, len(predicted_prices)) - 1:-1])
+                        new_features[ma_idx] = (recent_ma - X_mean[ma_idx]) / X_std[ma_idx]
+                
+                # 更新波動率
                 if 'Volatility' in feats and len(predicted_prices) >= 3:
                     volatility_idx = feats.index('Volatility')
                     recent_volatility = np.std(predicted_prices[-min(10, len(predicted_prices)):])
@@ -234,6 +248,7 @@ def predict_next_5(stock, days, decay_factor):
 
         preds = {f'T+{i + 1}': pred for i, pred in enumerate(predictions.values())}
 
+        # 顯示模型驗證資訊
         if len(X_val) > 0:
             y_pred_val = models[0][1].predict(X_val)
             mse = mean_squared_error(y_val, y_pred_val)
@@ -251,6 +266,7 @@ def predict_next_5(stock, days, decay_factor):
 
 
 def get_trade_advice(last, preds):
+    """根據預測結果提供交易建議。"""
     if not preds:
         return "無法判斷"
     price_changes = [preds[f'T+{d}'] - last for d in range(1, 6)]
@@ -269,6 +285,7 @@ def get_trade_advice(last, preds):
 
 
 # Streamlit UI
+st.set_page_config(page_title="股價預測系統", layout="centered", initial_sidebar_state="auto")
 st.title("📈 5 日股價預測系統")
 st.markdown("---")
 
