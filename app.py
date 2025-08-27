@@ -9,8 +9,7 @@ import time
 
 @st.cache_data
 def predict_next_5(stock, days=400, decay_factor=0.005):
-    # 設定起止日期
-    end = pd.Timestamp(datetime.today().date())  # 轉為 Timestamp 與 df.index 匹配
+    end = pd.Timestamp(datetime.today().date())
     start = end - pd.Timedelta(days=days)
 
     # 嘗試下載資料，添加重試邏輯
@@ -38,7 +37,6 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
     # 確保 close 是一維
     close = df['Close'] if isinstance(df['Close'], pd.Series) else df['Close'].iloc[:, 0]
 
-    # 填充 TWII 和 SP500 收盤價
     df['TWII_Close'] = twii['Close'].reindex(df.index).ffill()
     df['SP500_Close'] = sp['Close'].reindex(df.index).ffill()
 
@@ -51,7 +49,6 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
     df['MACD_Signal'] = macd.macd_signal()
     df['Prev_Close'] = close.shift(1)
 
-    # 定義特徵
     feats = ['Prev_Close', 'MA10', 'MA20', 'Volume', 'RSI', 'MACD', 'MACD_Signal', 'TWII_Close', 'SP500_Close']
     
     # 檢查特徵是否存在
@@ -60,58 +57,49 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
         st.error(f"缺少的特徵: {missing_feats}")
         return None, None, None
 
-    # 移除缺失值
     df = df.dropna()
     if len(df) < 30:
         st.error(f"資料不足，僅有 {len(df)} 行數據")
         return None, None, None
 
     # 定義特徵權重
-    feature_weights = {
-        'Prev_Close': 0.25,
-        'MA10': 0.15,
-        'MA20': 0.10,
-        'Volume': 0.05,
-        'RSI': 0.15,
-        'MACD': 0.10,
-        'MACD_Signal': 0.10,
-        'TWII_Close': 0.05,
-        'SP500_Close': 0.05
-    }
+    feature_weights = np.array([0.25, 0.15, 0.10, 0.05, 0.15, 0.10, 0.10, 0.05, 0.05])  # 對應 feats 順序
 
     # 計算基於日期的時間權重
     dates = df.index
     if not isinstance(dates, pd.DatetimeIndex):
         st.error("索引不是有效的日期格式")
         return None, None, None
-    time_diffs = [(end - date).days for date in dates]  # 計算與當前日期的差異（天）
+    time_diffs = [(end - date).days for date in dates]
     time_weights = np.array([np.exp(-decay_factor * diff) for diff in time_diffs])
     time_weights = time_weights / np.sum(time_weights)  # 正規化
 
-    # 應用特徵權重到數據
-    X = df[feats].values
-    for i, feat in enumerate(feats):
-        X[:, i] *= feature_weights[feat]
+    # 應用特徵權重到整個數據集
+    df_weighted = df[feats].copy()
+    df_weighted[feats] = df_weighted[feats].multiply(feature_weights, axis=1)
 
-    # 確保 X_latest 應用相同權重
-    X_latest = df[feats].iloc[-1:].values
-    for i, feat in enumerate(feats):
-        X_latest[:, i] *= feature_weights[feat]
+    # 確保 X_latest 應用權重
+    X_latest = df_weighted[feats].iloc[-1:].values
 
-    # 預測未來 5 天
     preds = {}
     for d in range(1, 6):
         tmp = df.copy()
         tmp['y'] = close.shift(-d)
         tmp = tmp.dropna()
-        X_train = tmp[feats].values
+        
+        # 應用權重到 tmp 的特徵
+        tmp_weighted = tmp[feats].multiply(feature_weights, axis=1)
+        X_train = tmp_weighted.values
         y_train = tmp['y'].values
 
         # 應用時間權重到訓練數據
         sample_weight = time_weights[:len(tmp)]
         model = LinearRegression()
         model.fit(X_train, y_train, sample_weight=sample_weight)
-        preds[f'T+{d}'] = float(model.predict(X_latest)[0])
+        
+        # 預測並確保非負
+        pred = model.predict(X_latest)[0]
+        preds[f'T+{d}'] = max(0, pred)  # 股價不可為負
 
     last = float(close.iloc[-1])
     dates = [(end + pd.offsets.BDay(d)).date() for d in range(1, 6)]
@@ -122,7 +110,6 @@ def get_trade_advice(last, preds):
     avg_change = np.mean(price_changes)
     return "買" if avg_change > 0 else "賣"
 
-# Streamlit 介面
 st.title("📈 5 日股價預測")
 code = st.text_input("股票代號", "3714.TW")
 days = st.slider("歷史數據天數", 100, 500, 400, step=50)
