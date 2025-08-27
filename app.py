@@ -8,13 +8,13 @@ import ta
 from datetime import datetime, timedelta
 import time
 
-# 股票名称到代号的映射字典（可扩展更多股票名称）
+# 股票名称到代号的映射字典（已更新为正确代号）
 stock_name_to_code = {
     "台積電": "2330.TW",
     "蘋果": "AAPL",
     "谷歌": "GOOG",
     "微軟": "MSFT",
-    "聯策": "6282.TW",
+    "聯策": "6658.TW",  # 正确代号为 6658.TW
     # 你可以根据需求添加更多股票
 }
 
