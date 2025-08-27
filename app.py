@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
-from datetime import datetime
+from datetime import datetime, time
 import time
 
 # 股票代號到中文名稱簡易對照字典，可自行擴充
@@ -298,57 +298,76 @@ def get_day_trading_advice(stock):
     此建議為模擬，不具備實時性，僅供參考。
     """
     try:
+        # 下載過去一個月的數據，用於計算 ATR
         df_historical = yf.download(stock, period='1mo', interval='1d', auto_adjust=True)
-        if len(df_historical) < 2:
+        if len(df_historical) < 14:
             return "無法提供當沖建議", "neutral", None, None
 
+        # 計算 ATR
         df_historical['TR'] = np.maximum(np.maximum(df_historical['High'] - df_historical['Low'], abs(df_historical['High'] - df_historical['Close'].shift(1))), abs(df_historical['Low'] - df_historical['Close'].shift(1)))
         df_historical['ATR'] = df_historical['TR'].rolling(window=14).mean()
-        
         atr_value = df_historical['ATR'].iloc[-1].item()
         
-        df_today = yf.download(stock, period='2d', interval='1d', auto_adjust=True)
-        if len(df_today) < 2: # 檢查是否有足夠數據 (今日開盤價及昨日收盤價)
+        # 取得最新一天的開盤價與前一日收盤價
+        df_last_two_days = yf.download(stock, period='2d', interval='1d', auto_adjust=True)
+        if len(df_last_two_days) < 2:
             return "無法提供當沖建議", "neutral", None, None
 
-        today_open = df_today.iloc[-1]['Open'].item()
-        yesterday_close = df_today.iloc[-2]['Close'].item()
+        today_open = df_last_two_days.iloc[-1]['Open'].item()
+        yesterday_close = df_last_two_days.iloc[-2]['Close'].item()
         
-        # 模擬盤中趨勢，基於開盤價與昨日收盤價的關係
-        gap_pct = (today_open - yesterday_close) / yesterday_close
-        
+        # 判斷當前時間
+        now = datetime.now().time()
+        market_open_time = time(9, 0)
+        market_close_time = time(13, 30)
+
         advice_text = ""
         advice_type = "neutral"
         suggested_buy_price = None
         suggested_sell_price = None
+        
+        volatility_factor = 0.6 # 可調整的波動因子，影響建議區間大小
 
-        if not np.isnan(atr_value) and not np.isnan(today_open):
-            # 根據 ATR 估算當沖區間
-            volatility_factor = 0.5 # 可調整的波動因子
-            buy_price_base = today_open - (atr_value * volatility_factor)
-            sell_price_base = today_open + (atr_value * volatility_factor)
+        if now >= market_open_time and now <= market_close_time:
+            # 盤中建議
+            # 模擬盤中趨勢，基於開盤價與昨日收盤價的關係
+            gap_pct = (today_open - yesterday_close) / yesterday_close
             
-            # 根據模擬趨勢調整建議
-            if gap_pct > 0.01: # 大幅跳空高開
+            if gap_pct > 0.01: # 大幅跳空高開，模擬盤中強勢
                 advice_text = "盤中強勢，適合偏多當沖"
                 advice_type = "bullish"
-                suggested_buy_price = buy_price_base
-                suggested_sell_price = sell_price_base + (atr_value * 0.5) # 提高賣出價
-            elif gap_pct < -0.01: # 大幅跳空低開
+                suggested_buy_price = today_open
+                suggested_sell_price = today_open + (atr_value * volatility_factor)
+            elif gap_pct < -0.01: # 大幅跳空低開，模擬盤中弱勢
                 advice_text = "盤中弱勢，適合偏空當沖"
                 advice_type = "bearish"
-                suggested_buy_price = buy_price_base - (atr_value * 0.5) # 降低買入價
-                suggested_sell_price = sell_price_base
+                suggested_sell_price = today_open
+                suggested_buy_price = today_open - (atr_value * volatility_factor)
             else:
                 advice_text = "盤中波動不明顯，建議觀望"
                 advice_type = "neutral"
-                suggested_buy_price = buy_price_base
-                suggested_sell_price = sell_price_base
+                suggested_buy_price = today_open - (atr_value * volatility_factor)
+                suggested_sell_price = today_open + (atr_value * volatility_factor)
 
+        else:
+            # 盤後或盤前建議
+            # 使用昨日收盤價來預估明日的當沖區間
+            yesterday_data = yf.download(stock, period='2d', interval='1d', auto_adjust=True).iloc[-2]
+            base_price = yesterday_data['Close'].item()
+            
+            # 使用 ATR 估算明日的波動區間
+            buy_price_prediction = base_price - (atr_value * volatility_factor)
+            sell_price_prediction = base_price + (atr_value * volatility_factor)
+            
+            advice_text = "盤後預測，建議明日當沖關注"
+            advice_type = "neutral"
+            suggested_buy_price = buy_price_prediction
+            suggested_sell_price = sell_price_prediction
+        
         return advice_text, advice_type, suggested_buy_price, suggested_sell_price
 
-    except Exception:
-        return "無法提供當沖建議", "neutral", None, None
+    except Exception as e:
+        return f"無法提供當沖建議: {str(e)}", "neutral", None, None
 
 
 st.set_page_config(page_title="股價預測系統", layout="centered", initial_sidebar_state="auto")
