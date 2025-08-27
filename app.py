@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import time
 
 @st.cache_data
-def predict_next_5(stock, days=400, decay_factor=0.005):
+def predict_next_5(stock, days, decay_factor):
     end = pd.Timestamp(datetime.today().date())
     start = end - pd.Timedelta(days=days)
 
@@ -23,7 +23,7 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
                 break
         except Exception as e:
             st.warning(f"嘗試 {attempt + 1}/{max_retries} 下載失敗: {e}")
-            time.sleep(2)  # 延遲 2 秒後重試
+            time.sleep(2)
         if attempt == max_retries - 1:
             st.error(f"無法下載資料：{stock}, ^TWII, 或 ^GSPC")
             return None, None, None
@@ -37,6 +37,7 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
     # 確保 close 是一維
     close = df['Close'] if isinstance(df['Close'], pd.Series) else df['Close'].iloc[:, 0]
 
+    # 填充外部指數
     df['TWII_Close'] = twii['Close'].reindex(df.index).ffill()
     df['SP500_Close'] = sp['Close'].reindex(df.index).ffill()
 
@@ -51,7 +52,7 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
 
     feats = ['Prev_Close', 'MA10', 'MA20', 'Volume', 'RSI', 'MACD', 'MACD_Signal', 'TWII_Close', 'SP500_Close']
     
-    # 檢查特徵是否存在
+    # 檢查特徵
     missing_feats = [f for f in feats if f not in df.columns]
     if missing_feats:
         st.error(f"缺少的特徵: {missing_feats}")
@@ -62,44 +63,42 @@ def predict_next_5(stock, days=400, decay_factor=0.005):
         st.error(f"資料不足，僅有 {len(df)} 行數據")
         return None, None, None
 
+    # 標準化特徵
+    df_standardized = (df[feats] - df[feats].mean()) / df[feats].std()
+
     # 定義特徵權重
     feature_weights = np.array([0.25, 0.15, 0.10, 0.05, 0.15, 0.10, 0.10, 0.05, 0.05])  # 對應 feats 順序
 
-    # 計算基於日期的時間權重
+    # 計算時間權重
     dates = df.index
-    if not isinstance(dates, pd.DatetimeIndex):
-        st.error("索引不是有效的日期格式")
-        return None, None, None
     time_diffs = [(end - date).days for date in dates]
     time_weights = np.array([np.exp(-decay_factor * diff) for diff in time_diffs])
-    time_weights = time_weights / np.sum(time_weights)  # 正規化
+    time_weights = time_weights / np.sum(time_weights)
 
-    # 應用特徵權重到整個數據集
-    df_weighted = df[feats].copy()
-    df_weighted[feats] = df_weighted[feats].multiply(feature_weights, axis=1)
+    # 準備訓練數據
+    X = df_standardized[feats].values
+    y = close.values
+    X_latest = df_standardized[feats].iloc[-1:].values
 
-    # 確保 X_latest 應用權重
-    X_latest = df_weighted[feats].iloc[-1:].values
-
+    # 預測未來 5 天
     preds = {}
     for d in range(1, 6):
         tmp = df.copy()
         tmp['y'] = close.shift(-d)
         tmp = tmp.dropna()
         
-        # 應用權重到 tmp 的特徵
-        tmp_weighted = tmp[feats].multiply(feature_weights, axis=1)
-        X_train = tmp_weighted.values
+        X_train = (tmp[feats] - df[feats].mean()) / df[feats].std()
         y_train = tmp['y'].values
-
-        # 應用時間權重到訓練數據
         sample_weight = time_weights[:len(tmp)]
+
         model = LinearRegression()
         model.fit(X_train, y_train, sample_weight=sample_weight)
-        
-        # 預測並確保非負
         pred = model.predict(X_latest)[0]
-        preds[f'T+{d}'] = max(0, pred)  # 股價不可為負
+
+        # 限制預測範圍（基於歷史價格 ±20%）
+        price_range = last * 0.20
+        pred = np.clip(pred, last - price_range, last + price_range)
+        preds[f'T+{d}'] = float(pred)
 
     last = float(close.iloc[-1])
     dates = [(end + pd.offsets.BDay(d)).date() for d in range(1, 6)]
@@ -110,10 +109,19 @@ def get_trade_advice(last, preds):
     avg_change = np.mean(price_changes)
     return "買" if avg_change > 0 else "賣"
 
+# Streamlit 介面
 st.title("📈 5 日股價預測")
 code = st.text_input("股票代號", "3714.TW")
-days = st.slider("歷史數據天數", 100, 500, 400, step=50)
-decay_factor = st.slider("時間衰減因子", 0.001, 0.01, 0.005, step=0.001)
+
+# 選擇模式
+mode = st.selectbox("選擇模式", ["中期模式", "短期模式", "長期模式"])
+if mode == "短期模式":
+    days, decay_factor = 100, 0.008
+elif mode == "長期模式":
+    days, decay_factor = 400, 0.002
+else:  # 中期模式
+    days, decay_factor = 200, 0.005
+
 if st.button("預測"):
     last, forecast, preds = predict_next_5(code.strip(), days, decay_factor)
     if last is None:
