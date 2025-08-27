@@ -292,81 +292,33 @@ def get_trade_advice(last, preds):
     else:
         return f"持有 (預期變動 {change_percent:.1f}%)"
 
-def get_day_trading_advice(stock):
+def get_short_term_advice(last_price, forecast_prices):
     """
-    提供基於模擬當日數據的當沖建議。
-    此建議為模擬，不具備實時性，僅供參考。
+    提供基於短期預測的趨勢建議。
     """
-    try:
-        # 下載過去一個月的數據，用於計算 ATR
-        df_historical = yf.download(stock, period='1mo', interval='1d', auto_adjust=True)
-        if len(df_historical) < 14:
-            return "無法提供當沖建議", "neutral", None, None
+    if not forecast_prices or len(forecast_prices) < 2:
+        return "無法提供短期趨勢建議", "neutral"
 
-        # 計算 ATR
-        df_historical['TR'] = np.maximum(np.maximum(df_historical['High'] - df_historical['Low'], abs(df_historical['High'] - df_historical['Close'].shift(1))), abs(df_historical['Low'] - df_historical['Close'].shift(1)))
-        df_historical['ATR'] = df_historical['TR'].rolling(window=14).mean()
-        atr_value = df_historical['ATR'].iloc[-1].item()
-        
-        # 取得最新一天的開盤價與前一日收盤價
-        df_last_two_days = yf.download(stock, period='2d', interval='1d', auto_adjust=True)
-        if len(df_last_two_days) < 2:
-            return "無法提供當沖建議", "neutral", None, None
+    first_day_price = forecast_prices[list(forecast_prices.keys())[0]]
+    second_day_price = forecast_prices[list(forecast_prices.keys())[1]]
+    
+    # 計算未來兩天的預測平均變化
+    avg_change_pct = ((first_day_price - last_price) + (second_day_price - first_day_price)) / 2 / last_price * 100
 
-        today_open = df_last_two_days.iloc[-1]['Open'].item()
-        yesterday_close = df_last_two_days.iloc[-2]['Close'].item()
-        
-        # 判斷當前時間
-        now_time = datetime.now().time()
-        market_open_time = time(9, 0)
-        market_close_time = time(13, 30)
+    advice_text = ""
+    advice_type = "neutral"
 
-        advice_text = ""
+    if avg_change_pct > 0.5:
+        advice_text = f"短期看漲 ({avg_change_pct:.1f}%)"
+        advice_type = "bullish"
+    elif avg_change_pct < -0.5:
+        advice_text = f"短期看跌 ({abs(avg_change_pct):.1f}%)"
+        advice_type = "bearish"
+    else:
+        advice_text = "短期趨勢不明顯，建議觀望"
         advice_type = "neutral"
-        suggested_buy_price = None
-        suggested_sell_price = None
-        
-        volatility_factor = 0.6 # 可調整的波動因子，影響建議區間大小
-
-        # 盤後或盤前建議
-        if not (now_time >= market_open_time and now_time <= market_close_time):
-            # 使用昨日收盤價來預估明日的當沖區間
-            base_price = yesterday_close
-            
-            # 使用 ATR 估算明日的波動區間
-            buy_price_prediction = base_price - (atr_value * volatility_factor)
-            sell_price_prediction = base_price + (atr_value * volatility_factor)
-            
-            advice_text = "盤後預測，建議明日當沖關注"
-            advice_type = "neutral"
-            suggested_buy_price = buy_price_prediction
-            suggested_sell_price = sell_price_prediction
-            
-        else:
-            # 盤中建議
-            # 模擬盤中趨勢，基於開盤價與昨日收盤價的關係
-            gap_pct = (today_open - yesterday_close) / yesterday_close
-            
-            if gap_pct > 0.01: # 大幅跳空高開，模擬盤中強勢
-                advice_text = "盤中強勢，適合偏多當沖"
-                advice_type = "bullish"
-                suggested_buy_price = today_open
-                suggested_sell_price = today_open + (atr_value * volatility_factor)
-            elif gap_pct < -0.01: # 大幅跳空低開，模擬盤中弱勢
-                advice_text = "盤中弱勢，適合偏空當沖"
-                advice_type = "bearish"
-                suggested_sell_price = today_open
-                suggested_buy_price = today_open - (atr_value * volatility_factor)
-            else:
-                advice_text = "盤中波動不明顯，建議觀望"
-                advice_type = "neutral"
-                suggested_buy_price = today_open - (atr_value * volatility_factor)
-                suggested_sell_price = today_open + (atr_value * volatility_factor)
-
-        return advice_text, advice_type, suggested_buy_price, suggested_sell_price
-
-    except Exception as e:
-        return f"無法提供當沖建議: {str(e)}", "neutral", None, None
+    
+    return advice_text, advice_type
 
 
 st.set_page_config(page_title="股價預測系統", layout="centered", initial_sidebar_state="auto")
@@ -393,7 +345,7 @@ if st.button("🔮 開始預測", type="primary"):
         full_code = f"{full_code}.TW"
     with st.spinner("正在下載資料並進行預測..."):
         last, forecast, preds = predict_next_5(full_code, days, decay_factor)
-        day_trading_advice, advice_type, buy_price, sell_price = get_day_trading_advice(full_code)
+        short_term_advice, advice_type = get_short_term_advice(last, forecast)
 
     if last is None:
         st.error("❌ 預測失敗，請檢查股票代號或網路連線")
@@ -420,20 +372,14 @@ if st.button("🔮 開始預測", type="primary"):
             else:
                 st.warning(f"📊 **5 日交易建議**: {advice}")
             
-            # 顯示當沖建議
+            # 顯示短期趨勢建議
             if advice_type == "bullish":
-                st.success(f"📈 **當沖建議**: {day_trading_advice}")
+                st.success(f"📈 **短期趨勢建議**: {short_term_advice}")
             elif advice_type == "bearish":
-                st.error(f"📉 **當沖建議**: {day_trading_advice}")
+                st.error(f"📉 **短期趨勢建議**: {short_term_advice}")
             else:
-                st.info(f"📊 **當沖建議**: {day_trading_advice}")
+                st.info(f"📊 **短期趨勢建議**: {short_term_advice}")
             
-            # 顯示當沖買賣價建議
-            if buy_price is not None and sell_price is not None:
-                st.markdown("### 📌 當沖買賣區間建議 (模擬)")
-                st.write(f"建議買入價：**${buy_price:.2f}**")
-                st.write(f"建議賣出價：**${sell_price:.2f}**")
-
 
         with col2:
             st.subheader("📅 未來 5 日預測")
@@ -462,4 +408,4 @@ if st.button("🔮 開始預測", type="primary"):
         st.line_chart(chart_data.set_index('日期'))
 
 st.markdown("---")
-st.caption("⚠️ **風險提示**: 當沖建議基於簡化數據，不具備實時性，僅供參考，請謹慎決策。")
+st.caption("⚠️ **風險提示**: 僅供參考，投資有風險，請謹慎決策。")
