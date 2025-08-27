@@ -77,7 +77,7 @@ def calculate_technical_indicators(df):
     return df
 
 @st.cache_data
-def predict_next_15(stock, days_for_model, forecast_days, decay_factor):
+def predict_with_model_config(stock, days_for_model, forecast_days, decay_factor):
     """
     下載股票數據，計算技術指標，並使用隨機森林模型預測未來15天的股價。
     Args:
@@ -115,8 +115,8 @@ def predict_next_15(stock, days_for_model, forecast_days, decay_factor):
                 st.error(f"無法下載資料：{stock}。請檢查股票代號或網路連線。")
                 return None, None, None, None
 
-        if df is None or len(df) < days_for_model + 30: # 確保有足夠的數據供模型訓練
-            st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據，無法進行預測。")
+        if df is None or len(df) < days_to_download - 30: # 確保有足夠的數據供模型訓練
+            st.error(f"下載的資料不足，僅有 {len(df) if df is not None else 0} 行數據。")
             return None, None, None, None
 
         if isinstance(df.columns, pd.MultiIndex):
@@ -362,7 +362,7 @@ if st.button("🔮 開始預測", type="primary"):
 
         # 傳遞足夠的歷史天數給模型
         history_days_for_model = days
-        last, forecast, preds, history_df_for_chart = predict_next_15(full_code, history_days_for_model, forecast_days_chart, decay_factor)
+        last, forecast, preds, history_df_for_chart = predict_with_model_config(full_code, history_days_for_model, forecast_days_chart, decay_factor)
         
         # 使用模型預測結果計算短期建議
         short_term_advice, advice_type = get_short_term_advice(last, forecast)
