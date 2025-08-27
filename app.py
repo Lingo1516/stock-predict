@@ -25,6 +25,7 @@ stock_name_dict = {
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
     try:
+        # 設定時間範圍
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
         max_retries = 3
