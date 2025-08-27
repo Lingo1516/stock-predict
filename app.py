@@ -82,6 +82,11 @@ def predict_next_5(stock, days, decay_factor):
     y = close.values
     X_latest = df_standardized[feats].iloc[-1:].values
 
+    # 檢查 X 和 y 長度是否一致
+    if len(X) != len(y):
+        st.error(f"特徵矩陣 X 和目標變數 y 的長度不一致，X 長度: {len(X)}, y 長度: {len(y)}")
+        return None, None, None
+
     # 訓練隨機森林模型
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, shuffle=False)
     model = RandomForestRegressor(n_estimators=100, random_state=42)
