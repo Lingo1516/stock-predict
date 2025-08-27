@@ -109,9 +109,7 @@ def predict_next_5(stock, days, decay_factor):
     for d in range(1, 6):
         pred = model.predict(X_latest)[0]
 
-        # 根據市場波動性自動調整預測範圍
-        price_range = last * 0.25  # 增加範圍來適應股市波動
-        pred = np.clip(pred, last - price_range, last + price_range)
+        # 去掉預測範圍限制，讓股價能夠自由波動
         preds[f'T+{d}'] = float(pred)
 
     dates = [(end + pd.offsets.BDay(d)).date() for d in range(1, 6)]
