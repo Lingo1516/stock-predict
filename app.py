@@ -9,8 +9,7 @@ from sklearn.ensemble import RandomForestRegressor
 import numpy as np
 import ta
 
-
-# 获取台湾股市所有上市、上柜公司的股票代号与名称
+# 从台湾证券交易所获取所有上市、上柜的公司中文名称和代号
 def fetch_twse_stock_codes():
     url = 'https://www.twse.com.tw/zh/listed/listed_companies'
     response = requests.get(url)
@@ -30,8 +29,20 @@ def fetch_twse_stock_codes():
     df = pd.DataFrame(stock_data, columns=['Stock Name', 'Stock Code'])
     return df
 
+# 将股票信息存储到内存（例如城市环境）以进行查询
+stock_list = fetch_twse_stock_codes()
 
-# 查询股票名称的函数
+# 通过股票名称获取对应的股票代号
+def get_stock_code(stock_name):
+    stock_name = stock_name.strip()
+    # 查找股票代号
+    code_row = stock_list[stock_list['Stock Name'] == stock_name]
+    if not code_row.empty:
+        return f"{code_row.iloc[0]['Stock Code']}.TW"
+    else:
+        return None
+
+# 获取股票名称
 def get_stock_name(stock_code):
     stock_code = stock_code.strip().upper()
     if not stock_code.endswith('.TW'):
@@ -44,36 +55,28 @@ def get_stock_name(stock_code):
         st.error(f"无法获取股票名称：{e}")
         return None
 
-
-# 根据中文名称获取股票代号
-def get_stock_code(stock_name, stock_list):
-    stock_name = stock_name.strip()
-    # 尝试从字典中查找中文名称的代号
-    code_row = stock_list[stock_list['Stock Name'] == stock_name]
-    if not code_row.empty:
-        return f"{code_row.iloc[0]['Stock Code']}.TW"
-    else:
-        return None
-
-
 # 下载股票数据
-def download_stock_data(stock_name, stock_list, start_date, end_date):
-    stock_code = get_stock_code(stock_name, stock_list)
+def download_stock_data(stock_name, start_date, end_date):
+    stock_code = get_stock_code(stock_name)
     if stock_code:
         df = yf.download(stock_code, start=start_date, end=end_date)
         return df
     else:
         return None
 
-
 @st.cache_data
-def predict_next_5(stock, stock_list, days, decay_factor):
+def predict_next_5(stock, days, decay_factor):
     try:
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
 
         # 根据股票名称取得代号
-        stock_code = get_stock_code(stock.strip(), stock_list)
+        stock_code = get_stock_code(stock.strip())
+
+        # 如果没有获取到股票代号，返回错误信息
+        if stock_code is None:
+            st.error("无法获取股票代号，请检查股票名称或代号。")
+            return None, None, None
 
         # 下载数据并添加错误处理
         max_retries = 3
