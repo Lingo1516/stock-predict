@@ -3,7 +3,6 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 import ta
 from datetime import datetime, timedelta
@@ -171,9 +170,26 @@ def predict_next_5(stock, days, decay_factor):
         predicted_prices = [last_close]  # 包含最後一天的實際價格
         
         for i, date in enumerate(future_dates):
+            # 使用模型進行預測並加上隨機變化
             pred = rf_model.predict(current_features)[0]
-            predictions[date] = float(pred)
-            predicted_prices.append(pred)
+            variation = np.random.normal(0, pred * 0.005)  # 0.5% 隨機變化
+            final_pred = pred + variation
+            predictions[date] = final_pred
+            predicted_prices.append(final_pred)
+            
+            # 更新特徵
+            new_features = current_features[0].copy()
+            prev_close_idx = feats.index('Prev_Close')
+            new_features[prev_close_idx] = (final_pred - X_mean[prev_close_idx]) / X_std[prev_close_idx]
+            
+            # 更新滯後特徵
+            for j in range(1, min(4, len(predicted_prices))):
+                if f'Prev_Close_Lag{j}' in feats:
+                    lag_idx = feats.index(f'Prev_Close_Lag{j}')
+                    lag_price = predicted_prices[-(j+1)]
+                    new_features[lag_idx] = (lag_price - X_mean[lag_idx]) / X_std[lag_idx]
+                
+            current_features = new_features.reshape(1, -1)
 
         # 計算預測字典
         preds = {f'T+{i+1}': pred for i, pred in enumerate(predictions.values())}
