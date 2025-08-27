@@ -8,44 +8,47 @@ import ta
 from datetime import datetime, timedelta
 import time
 
-# 股票名稱到代號的映射字典（可擴展更多股票名稱）
+# 股票名称到代号的映射字典（可扩展更多股票名称）
 stock_name_to_code = {
     "台積電": "2330.TW",
     "蘋果": "AAPL",
     "谷歌": "GOOG",
     "微軟": "MSFT",
-    # 你可以根據需求添加更多股票
+    "聯策": "6282.TW",
+    # 你可以根据需求添加更多股票
 }
 
-# 查詢股票名稱的函式
+# 查询股票名称的函数
 def get_stock_name(stock_code):
     stock_code = stock_code.strip().upper()
     if not stock_code.endswith('.TW'):
-        stock_code += '.TW'  # 如果未提供 .TW，則自動補全
+        stock_code += '.TW'  # 如果未提供 .TW，则自动补全
     try:
         stock = yf.Ticker(stock_code)
         info = stock.info
         return info.get('longName', '未知股票名稱')
     except Exception as e:
-        st.error(f"無法獲取股票名稱：{e}")
+        st.error(f"无法获取股票名称：{e}")
         return None
 
-# 根據股票名稱獲取股票代號
+# 根据股票名称获取股票代号
 def get_stock_code(stock_name):
     stock_name = stock_name.strip()
-    # 嘗試從字典中查找中文名稱的代號
+    # 尝试从字典中查找中文名称的代号
     code = stock_name_to_code.get(stock_name, None)
     
     if not code:
         try:
-            # 嘗試從 Yahoo Finance 查找股票名稱對應的代號
+            # 尝试从 Yahoo Finance 查找股票名称对应的代号
             stock = yf.Ticker(stock_name)
             info = stock.info
             if info.get('symbol'):
-                return info['symbol']  # 返回正確的股票代號
-        except:
-            pass
-    return code if code else stock_name  # 若無法找到，返回原始名稱
+                return info['symbol']  # 返回正确的股票代号
+        except Exception as e:
+            st.warning(f"无法通过Yahoo Finance查找股票：{stock_name}，错误：{e}")
+    
+    # 如果没有找到代号，返回原始代号（用户输入）
+    return code if code else f"{stock_name}.TW"  # 自动加上 `.TW` 后缀
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
@@ -53,10 +56,10 @@ def predict_next_5(stock, days, decay_factor):
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
 
-        # 根據股票名稱取得代號
+        # 根据股票名称取得代号
         stock_code = get_stock_code(stock.strip())
 
-        # 下載資料並添加錯誤處理
+        # 下载数据并添加错误处理
         max_retries = 3
         df, twii, sp = None, None, None
         
@@ -73,19 +76,19 @@ def predict_next_5(stock, days, decay_factor):
                     break
                     
             except Exception as e:
-                st.warning(f"嘗試 {attempt + 1}/{max_retries} 下載失敗: {e}")
+                st.warning(f"尝试 {attempt + 1}/{max_retries} 下载失败: {e}")
                 time.sleep(2)
                 
             if attempt == max_retries - 1:
-                st.error(f"無法下載資料：{stock_code}")
+                st.error(f"无法下载数据：{stock_code}")
                 return None, None, None
 
-        # 檢查資料是否充足
+        # 检查数据是否充足
         if df is None or len(df) < 50:
-            st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據")
+            st.error(f"数据不足，仅有 {len(df) if df is not None else 0} 行数据")
             return None, None, None
 
-        # 處理多重索引
+        # 处理多重索引
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] for col in df.columns]
         if isinstance(twii.columns, pd.MultiIndex):
@@ -93,97 +96,97 @@ def predict_next_5(stock, days, decay_factor):
         if isinstance(sp.columns, pd.MultiIndex):
             sp.columns = [col[0] for col in sp.columns]
 
-        # 確保收盤價是一維序列
+        # 确保收盘价是一维序列
         close = df['Close'].squeeze() if 'Close' in df.columns else df.iloc[:, 3].squeeze()
         
-        # 填充外部指數資料
+        # 填充外部指数资料
         df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
         df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
 
-        # 計算技術指標
+        # 计算技术指标
         df['MA10'] = close.rolling(10, min_periods=1).mean()
         df['MA20'] = close.rolling(20, min_periods=1).mean()
         df['MA5'] = close.rolling(5, min_periods=1).mean()
         
-        # 計算 RSI
+        # 计算 RSI
         try:
             df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
         except:
-            # 簡單的 RSI 計算作為後備
+            # 简单的 RSI 计算作为后备
             delta = close.diff()
             gain = delta.where(delta > 0, 0).rolling(14, min_periods=1).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=1).mean()
             rs = gain / loss
             df['RSI'] = 100 - (100 / (1 + rs))
 
-        # 計算 MACD
+        # 计算 MACD
         try:
             macd = ta.trend.MACD(close)
             df['MACD'] = macd.macd()
             df['MACD_Signal'] = macd.macd_signal()
         except:
-            # 簡單的 MACD 計算作為後備
+            # 简单的 MACD 计算作为后备
             ema12 = close.ewm(span=12).mean()
             ema26 = close.ewm(span=26).mean()
             df['MACD'] = ema12 - ema26
             df['MACD_Signal'] = df['MACD'].ewm(span=9).mean()
 
-        # 添加滯後特徵
+        # 添加滞后特征
         df['Prev_Close'] = close.shift(1)
-        for i in range(1, 4):  # 減少滯後特徵數量
+        for i in range(1, 4):  # 减少滞后特征数量
             df[f'Prev_Close_Lag{i}'] = close.shift(i)
 
-        # 添加成交量特徵
+        # 添加成交量特征
         if 'Volume' in df.columns:
             df['Volume_MA'] = df['Volume'].rolling(10, min_periods=1).mean()
         else:
             df['Volume_MA'] = 0
 
-        # 添加波動率指標
+        # 添加波动率指标
         df['Volatility'] = close.rolling(10, min_periods=1).std()
         
-        # 選擇特徵
+        # 选择特征
         feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD', 
                 'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility'] + \
                 [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
-        # 檢查缺失的特徵
+        # 检查缺失的特征
         missing_feats = [f for f in feats if f not in df.columns]
         if missing_feats:
-            st.error(f"缺少特徵: {missing_feats}")
+            st.error(f"缺少特征: {missing_feats}")
             return None, None, None
 
         # 移除有缺失值的行
         df_clean = df[feats + ['Close']].dropna()
         
         if len(df_clean) < 30:
-            st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據")
+            st.error(f"清理后数据不足，仅有 {len(df_clean)} 行数据")
             return None, None, None
 
-        # 準備訓練數據
+        # 准备训练数据
         X = df_clean[feats].values
         y = df_clean['Close'].values
         
-        # 標準化特徵
+        # 标准化特征
         X_mean = np.mean(X, axis=0)
         X_std = np.std(X, axis=0)
         X_std[X_std == 0] = 1  # 避免除以零
         X_normalized = (X - X_mean) / X_std
 
-        # 計算時間權重
+        # 计算时间权重
         weights = np.exp(-decay_factor * np.arange(len(X))[::-1])
         weights = weights / np.sum(weights)
 
-        # 分割訓練和驗證集
+        # 分割训练和验证集
         split_idx = int(len(X_normalized) * 0.8)
         X_train, X_val = X_normalized[:split_idx], X_normalized[split_idx:]
         y_train, y_val = y[:split_idx], y[split_idx:]
         train_weights = weights[:split_idx]
 
-        # 訓練多個模型來增加預測多樣性
+        # 训练多个模型来增加预测多样性
         models = []
         
-        # 主要隨機森林模型
+        # 主要随机森林模型
         rf_model = RandomForestRegressor(
             n_estimators=100,
             max_depth=10,
@@ -195,36 +198,36 @@ def predict_next_5(stock, days, decay_factor):
         rf_model.fit(X_train, y_train, sample_weight=train_weights)
         models.append(('RF', rf_model))
         
-        # 預測未來 5 天 - 使用集成模型
+        # 预测未来 5 天 - 使用集成模型
         last_features = X_normalized[-1:].copy()
         last_close = float(y[-1])
         predictions = {}
         
-        # 創建未來日期
+        # 创建未来日期
         future_dates = []
         current_date = end
         for i in range(5):
             current_date = current_date + pd.offsets.BDay(1)
             future_dates.append(current_date.date())
 
-        # 逐步預測 - 每次預測後更新特徵
+        # 逐步预测 - 每次预测后更新特征
         current_features = last_features.copy()
-        predicted_prices = [last_close]  # 包含最後一天的實際價格
+        predicted_prices = [last_close]  # 包含最后一天的实际价格
         
         for i, date in enumerate(future_dates):
-            # 使用模型進行預測並加上隨機變化
+            # 使用模型进行预测并加上随机变化
             pred = rf_model.predict(current_features)[0]
-            variation = np.random.normal(0, pred * 0.005)  # 0.5% 隨機變化
+            variation = np.random.normal(0, pred * 0.005)  # 0.5% 随机变化
             final_pred = pred + variation
             predictions[date] = final_pred
             predicted_prices.append(final_pred)
             
-            # 更新特徵
+            # 更新特征
             new_features = current_features[0].copy()
             prev_close_idx = feats.index('Prev_Close')
             new_features[prev_close_idx] = (final_pred - X_mean[prev_close_idx]) / X_std[prev_close_idx]
             
-            # 更新滯後特徵
+            # 更新滞后特征
             for j in range(1, min(4, len(predicted_prices))):
                 if f'Prev_Close_Lag{j}' in feats:
                     lag_idx = feats.index(f'Prev_Close_Lag{j}')
@@ -233,91 +236,91 @@ def predict_next_5(stock, days, decay_factor):
                 
             current_features = new_features.reshape(1, -1)
 
-        # 計算預測字典
+        # 计算预测字典
         preds = {f'T+{i+1}': pred for i, pred in enumerate(predictions.values())}
 
         return last_close, predictions, preds
 
     except Exception as e:
-        st.error(f"預測過程發生錯誤: {str(e)}")
+        st.error(f"预测过程发生错误: {str(e)}")
         return None, None, None
 
 def get_trade_advice(last, preds):
-    """根據預測結果給出交易建議"""
+    """根据预测结果给出交易建议"""
     if not preds:
-        return "無法判斷"
+        return "无法判断"
     
     price_changes = [preds[f'T+{d}'] - last for d in range(1, 6)]
     avg_change = np.mean(price_changes)
     change_percent = (avg_change / last) * 100
     
     if change_percent > 2:
-        return f"強烈買入 (預期上漲 {change_percent:.1f}%)"
+        return f"强烈买入 (预期上涨 {change_percent:.1f}%)"
     elif change_percent > 0.5:
-        return f"買入 (預期上漲 {change_percent:.1f}%)"
+        return f"买入 (预期上涨 {change_percent:.1f}%)"
     elif change_percent < -2:
-        return f"強烈賣出 (預期下跌 {abs(change_percent):.1f}%)"
+        return f"强烈卖出 (预期下跌 {abs(change_percent):.1f}%)"
     elif change_percent < -0.5:
-        return f"賣出 (預期下跌 {abs(change_percent):.1f}%)"
+        return f"卖出 (预期下跌 {abs(change_percent):.1f}%)"
     else:
-        return f"持有 (預期變動 {change_percent:.1f}%)"
+        return f"持有 (预期变动 {change_percent:.1f}%)"
 
-# Streamlit 介面
-st.title("📈 5 日股價預測系統")
+# Streamlit 界面
+st.title("📈 5 日股价预测系统")
 st.markdown("---")
 
-# 輸入區域
+# 输入区域
 col1, col2 = st.columns([2, 1])
 with col1:
-    stock_input = st.text_input("請輸入股票代號或名稱", "台積電", help="例如：2330 (台積電)、AAPL (蘋果)")
+    stock_input = st.text_input("请输入股票代号或名称", "台积电", help="例如：2330 (台积电)、AAPL (苹果)")
 
 with col2:
-    mode = st.selectbox("預測模式", ["中期模式", "短期模式", "長期模式"])
+    mode = st.selectbox("预测模式", ["中期模式", "短期模式", "长期模式"])
 
-# 根據股票代號查詢股票名稱
+# 根据股票代号查询股票名称
 stock_name = get_stock_name(stock_input.strip())
 
-# 顯示選擇的股票名稱
+# 显示选择的股票名称
 if stock_name:
-    st.info(f"您選擇的股票是: {stock_name}")
+    st.info(f"您选择的股票是: {stock_name}")
 else:
-    st.error("無法識別此股票代號，請檢查代號或名稱")
+    st.error("无法识别此股票代号，请检查代号或名称")
 
-# 模式說明
+# 模式说明
 mode_info = {
-    "短期模式": ("使用 100 天歷史資料，高敏感度", 100, 0.008),
-    "中期模式": ("使用 200 天歷史資料，平衡敏感度", 200, 0.005),
-    "長期模式": ("使用 400 天歷史資料，低敏感度", 400, 0.002)
+    "短期模式": ("使用 100 天历史资料，高敏感度", 100, 0.008),
+    "中期模式": ("使用 200 天历史资料，平衡敏感度", 200, 0.005),
+    "长期模式": ("使用 400 天历史资料，低敏感度", 400, 0.002)
 }
 
 st.info(f"**{mode}**: {mode_info[mode][0]}")
 days, decay_factor = mode_info[mode][1], mode_info[mode][2]
 
-if st.button("🔮 開始預測", type="primary"):
-    with st.spinner("正在下載資料並進行預測..."):
+if st.button("🔮 开始预测", type="primary"):
+    with st.spinner("正在下载资料并进行预测..."):
         last, forecast, preds = predict_next_5(stock_input.strip().upper(), days, decay_factor)
     
     if last is None:
-        st.error("❌ 預測失敗，請檢查股票代號或網路連線")
+        st.error("❌ 预测失败，请检查股票代号或网络连接")
     else:
-        # 顯示結果
-        st.success("✅ 預測完成！")
+        # 显示结果
+        st.success("✅ 预测完成！")
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.metric("當前股價", f"${last:.2f}")
+            st.metric("当前股价", f"${last:.2f}")
             advice = get_trade_advice(last, preds)
             
-            if "買入" in advice:
-                st.success(f"📈 **交易建議**: {advice}")
-            elif "賣出" in advice:
-                st.error(f"📉 **交易建議**: {advice}")
+            if "买入" in advice:
+                st.success(f"📈 **交易建议**: {advice}")
+            elif "卖出" in advice:
+                st.error(f"📉 **交易建议**: {advice}")
             else:
-                st.warning(f"📊 **交易建議**: {advice}")
+                st.warning(f"📊 **交易建议**: {advice}")
         
         with col2:
-            st.subheader("📅 未來 5 日預測")
+            st.subheader("📅 未来 5 日预测")
             for date, price in forecast.items():
                 change = price - last
                 change_pct = (change / last) * 100
@@ -327,13 +330,13 @@ if st.button("🔮 開始預測", type="primary"):
                 else:
                     st.write(f"**{date}**: ${price:.2f} ({change:.2f}, {change_pct:.1f}%)")
         
-        # 繪製趨勢圖
-        st.subheader("📈 預測趨勢")
+        # 绘制趋势图
+        st.subheader("📈 预测趋势")
         chart_data = pd.DataFrame({
             '日期': ['今日'] + list(forecast.keys()),
-            '股價': [last] + list(forecast.values())
+            '股价': [last] + list(forecast.values())
         })
         st.line_chart(chart_data.set_index('日期'))
 
 st.markdown("---")
-st.caption("⚠️ 此預測僅供參考，投資有風險，請謹慎決策")
+st.caption("⚠️ 此预测仅供参考，投资有风险，请谨慎决策")
