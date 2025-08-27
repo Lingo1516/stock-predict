@@ -306,14 +306,14 @@ def get_day_trading_advice(stock):
         df_historical['TR'] = np.maximum(np.maximum(df_historical['High'] - df_historical['Low'], abs(df_historical['High'] - df_historical['Close'].shift(1))), abs(df_historical['Low'] - df_historical['Close'].shift(1)))
         df_historical['ATR'] = df_historical['TR'].rolling(window=14).mean()
         
-        atr_value = df_historical['ATR'].iloc[-1]
+        atr_value = df_historical['ATR'].iloc[-1].item()
         
         # 取得最新開盤價
         df_today = yf.download(stock, period='2d', interval='1d', auto_adjust=True)
         if len(df_today) < 1:
             return "無法提供當沖建議", "neutral", None, None
 
-        today_open = df_today.iloc[-1]['Open']
+        today_open = df_today.iloc[-1]['Open'].item()
         
         # 模擬盤中隨機變動
         np.random.seed(int(datetime.now().timestamp()))
@@ -352,7 +352,7 @@ st.set_page_config(page_title="股價預測系統", layout="centered", initial_s
 st.title("📈 5 日股價預測系統")
 st.markdown("---")
 
-col1, col2 = st.columns([2, 1])
+col1, col2 = st.columns(2)
 with col1:
     code = st.text_input("請輸入股票代號（僅輸入數字部分即可）", "2330")
 with col2:
