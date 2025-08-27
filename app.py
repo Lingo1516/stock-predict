@@ -352,8 +352,7 @@ def get_day_trading_advice(stock):
         else:
             # 盤後或盤前建議
             # 使用昨日收盤價來預估明日的當沖區間
-            yesterday_data = yf.download(stock, period='2d', interval='1d', auto_adjust=True).iloc[-2]
-            base_price = yesterday_data['Close'].item()
+            base_price = yesterday_close
             
             # 使用 ATR 估算明日的波動區間
             buy_price_prediction = base_price - (atr_value * volatility_factor)
