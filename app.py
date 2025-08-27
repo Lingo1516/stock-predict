@@ -1,4 +1,15 @@
 # 在預測未來價格的部分
+current_date = end
+future_dates = []
+for i in range(5):
+    current_date = current_date + pd.offsets.BDay(1)
+    future_dates.append(current_date.date())
+
+current_features = last_features.copy()
+predicted_prices = [last_close]
+
+max_deviation_pct = 0.10  # 最大偏離限制 ±10%
+
 for i, date in enumerate(future_dates):
     day_predictions = []
     for model_name, model in models:
