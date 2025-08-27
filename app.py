@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import time
 
 # 股票代號到中文名稱簡易對照字典，可自行擴充
@@ -77,19 +77,21 @@ def calculate_technical_indicators(df):
     return df
 
 @st.cache_data
-def predict_next_5(stock, days, decay_factor):
+def predict_next_15(stock, history_days, forecast_days, decay_factor):
     """
-    下載股票數據，計算技術指標，並使用隨機森林模型預測未來5天的股價。
+    下載股票數據，計算技術指標，並使用隨機森林模型預測未來15天的股價。
     Args:
         stock (str): 股票代號，例如 "2330.TW"。
-        days (int): 要下載的歷史天數。
+        history_days (int): 要下載的歷史天數。
+        forecast_days (int): 要預測的天數。
         decay_factor (float): 權重衰減因子，用於強調近期數據的重要性。
     Returns:
         tuple: (當前股價, 未來預測價格字典, 預測價格列表)。
     """
     try:
         end = pd.Timestamp(datetime.today().date())
-        start = end - pd.Timedelta(days=days)
+        # 下載歷史數據天數調整為2倍歷史天數 + 預測天數，確保計算指標有足夠資料
+        start = end - pd.Timedelta(days=history_days * 2) 
         max_retries = 3
         df, twii, sp = None, None, None
 
@@ -109,11 +111,11 @@ def predict_next_5(stock, days, decay_factor):
 
             if attempt == max_retries - 1:
                 st.error(f"無法下載資料：{stock}。請檢查股票代號或網路連線。")
-                return None, None, None
+                return None, None, None, None
 
-        if df is None or len(df) < 50:
+        if df is None or len(df) < history_days * 2:
             st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據，無法進行預測。")
-            return None, None, None
+            return None, None, None, None
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] for col in df.columns]
@@ -124,7 +126,7 @@ def predict_next_5(stock, days, decay_factor):
 
         if not all(col in df.columns for col in ['Close', 'High', 'Low', 'Volume', 'Open']):
             st.error("股票數據中缺少必要的欄位 (Open, Close, High, Low, Volume)。")
-            return None, None, None
+            return None, None, None, None
 
         df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
         df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
@@ -158,13 +160,13 @@ def predict_next_5(stock, days, decay_factor):
         missing_feats = [f for f in feats if f not in df.columns]
         if missing_feats:
             st.error(f"缺少特徵: {missing_feats}")
-            return None, None, None
+            return None, None, None, None
 
         df_clean = df[feats + ['Close']].fillna(method='ffill').fillna(0)
         
-        if len(df_clean) < 30:
+        if len(df_clean) < history_days * 2:
             st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據，無法進行預測。")
-            return None, None, None
+            return None, None, None, None
 
         X = df_clean[feats].values
         y = df_clean['Close'].values
@@ -196,9 +198,10 @@ def predict_next_5(stock, days, decay_factor):
         last_features = X_normalized[-1:].copy()
         last_close = float(y[-1])
         predictions = {}
+        # 預測未來 15 天
         future_dates = []
         current_date = end
-        for i in range(5):
+        for i in range(forecast_days):
             current_date = current_date + pd.offsets.BDay(1)
             future_dates.append(current_date.date())
 
@@ -227,7 +230,7 @@ def predict_next_5(stock, days, decay_factor):
             predictions[date] = float(final_pred)
             predicted_prices.append(final_pred)
 
-            if i < 4:
+            if i < forecast_days - 1:
                 new_features = current_features[0].copy()
                 prev_close_idx = feats.index('Prev_Close')
                 new_features[prev_close_idx] = (final_pred - X_mean[prev_close_idx]) / X_std[prev_close_idx]
@@ -267,11 +270,14 @@ def predict_next_5(stock, days, decay_factor):
             top_features = sorted(zip(feats, feature_importance), key=lambda x: x[1], reverse=True)[:5]
             st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
 
-        return last_close, predictions, preds
+        # 返回歷史數據的子集，用於繪製圖表
+        history_df_for_chart = df.tail(history_days).copy()
+        
+        return last_close, predictions, preds, history_df_for_chart
 
     except Exception as e:
         st.error(f"預測過程發生錯誤: {str(e)}")
-        return None, None, None
+        return None, None, None, None
 
 
 def get_trade_advice(last, preds):
@@ -322,13 +328,14 @@ def get_short_term_advice(last_price, forecast_prices):
 
 
 st.set_page_config(page_title="股價預測系統", layout="centered", initial_sidebar_state="auto")
-st.title("📈 5 日股價預測系統")
+st.title("📈 股價預測系統")
 st.markdown("---")
 
 col1, col2 = st.columns(2)
 with col1:
     code = st.text_input("請輸入股票代號（僅輸入數字部分即可）", "2330")
 with col2:
+    # 預設為中期模式，可供用戶選擇
     mode = st.selectbox("預測模式", ["中期模式", "短期模式", "長期模式"])
 
 mode_info = {
@@ -344,7 +351,15 @@ if st.button("🔮 開始預測", type="primary"):
     if not full_code.upper().endswith(".TW"):
         full_code = f"{full_code}.TW"
     with st.spinner("正在下載資料並進行預測..."):
-        last, forecast, preds = predict_next_5(full_code, days, decay_factor)
+        # 調整為 15 天歷史數據，15 天預測
+        history_days_chart = 15
+        forecast_days_chart = 15
+
+        # 傳遞足夠的歷史天數給模型
+        history_days_for_model = days
+        last, forecast, preds, history_df_for_chart = predict_next_15(full_code, history_days_for_model, forecast_days_chart, decay_factor)
+        
+        # 使用模型預測結果計算短期建議
         short_term_advice, advice_type = get_short_term_advice(last, forecast)
 
     if last is None:
@@ -382,7 +397,7 @@ if st.button("🔮 開始預測", type="primary"):
             
 
         with col2:
-            st.subheader("📅 未來 5 日預測")
+            st.subheader("📅 未來 15 日預測")
             for date, price in forecast.items():
                 change = price - last
                 change_pct = (change / last) * 100
@@ -400,12 +415,19 @@ if st.button("🔮 開始預測", type="primary"):
             st.write(f"最佳買點：**{min_date}**，預測價格：${min_price:.2f}")
             st.write(f"最佳賣點：**{max_date}**，預測價格：${max_price:.2f}")
 
-        st.subheader("📈 預測趨勢")
-        chart_data = pd.DataFrame({
-            '日期': ['今日'] + list(forecast.keys()),
-            '股價': [last] + list(forecast.values())
-        })
-        st.line_chart(chart_data.set_index('日期'))
+        # 組合歷史和預測數據，並確保歷史數據為 15 天
+        history_df = df_history.tail(history_days_chart).copy()
+        history_df = history_df[['Close']]
+        history_df.index = history_df.index.strftime('%Y-%m-%d')
+        
+        forecast_df = pd.DataFrame(list(forecast.values()), index=list(forecast.keys()), columns=['Close'])
+        forecast_df.index = pd.to_datetime(forecast_df.index).strftime('%Y-%m-%d')
+        
+        combined_df = pd.concat([history_df, forecast_df])
+        combined_df.columns = ['股價']
+        
+        st.subheader("📈 預測趨勢 (15天歷史 + 15天預估)")
+        st.line_chart(combined_df)
 
 st.markdown("---")
 st.caption("⚠️ **風險提示**: 僅供參考，投資有風險，請謹慎決策。")
