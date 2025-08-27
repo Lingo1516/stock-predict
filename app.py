@@ -9,6 +9,7 @@ from datetime import datetime
 import time
 from ta.volatility import BollingerBands
 from ta.trend import ADXIndicator
+from sklearn.model_selection import GridSearchCV
 
 # 股票代號到中文名稱簡易對照字典，可自行擴充
 stock_name_dict = {
@@ -45,6 +46,11 @@ def predict_next_5(stock, days, decay_factor):
 
         if df is None or len(df) < 50:
             st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據")
+            return None, None, None
+
+        # 數據完整性檢查
+        if df.isnull().values.any() or twii.isnull().values.any() or sp.isnull().values.any():
+            st.error("數據中存在缺失值，請檢查股票代號或網路連線")
             return None, None, None
 
         if isinstance(df.columns, pd.MultiIndex):
@@ -133,38 +139,18 @@ def predict_next_5(stock, days, decay_factor):
 
         models = []
 
-        rf_model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            min_samples_split=5,
-            min_samples_leaf=2,
-            random_state=42,
-            n_jobs=-1
-        )
-        rf_model.fit(X_train, y_train, sample_weight=train_weights)
-        models.append(('RF', rf_model))
-
-        rf_model2 = RandomForestRegressor(
-            n_estimators=80,
-            max_depth=8,
-            min_samples_split=3,
-            min_samples_leaf=1,
-            random_state=123,
-            n_jobs=-1
-        )
-        rf_model2.fit(X_train, y_train, sample_weight=train_weights)
-        models.append(('RF2', rf_model2))
-
-        rf_model3 = RandomForestRegressor(
-            n_estimators=120,
-            max_depth=12,
-            min_samples_split=7,
-            min_samples_leaf=3,
-            random_state=456,
-            n_jobs=-1
-        )
-        rf_model3.fit(X_train, y_train, sample_weight=train_weights)
-        models.append(('RF3', rf_model3))
+        # 使用 GridSearchCV 進行超參數調整
+        rf_model = RandomForestRegressor(random_state=42, n_jobs=-1)
+        param_grid = {
+            'n_estimators': [80, 100, 120],
+            'max_depth': [8, 10, 12],
+            'min_samples_split': [2, 5, 7],
+            'min_samples_leaf': [1, 2, 3]
+        }
+        grid_search = GridSearchCV(rf_model, param_grid, cv=3, scoring='neg_mean_squared_error', n_jobs=-1)
+        grid_search.fit(X_train, y_train, sample_weight=train_weights)
+        best_rf_model = grid_search.best_estimator_
+        models.append(('RF', best_rf_model))
 
         last_features = X_normalized[-1:].copy()
         last_close = float(y[-1])
@@ -187,7 +173,7 @@ def predict_next_5(stock, days, decay_factor):
                 variation = np.random.normal(0, pred * 0.002)  # 隨機變異降至0.2%
                 day_predictions.append(pred + variation)
 
-            weights_ensemble = [0.5, 0.3, 0.2]
+            weights_ensemble = [0.5, 0.5]  # 目前只有一個模型
             ensemble_pred = np.average(day_predictions, weights=weights_ensemble)
 
             historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])
