@@ -154,29 +154,6 @@ def predict_next_5(stock, days, decay_factor):
         rf_model.fit(X_train, y_train, sample_weight=train_weights)
         models.append(('RF', rf_model))
         
-        # 添加更多變化的模型
-        rf_model2 = RandomForestRegressor(
-            n_estimators=80,
-            max_depth=8,
-            min_samples_split=3,
-            min_samples_leaf=1,
-            random_state=123,
-            n_jobs=-1
-        )
-        rf_model2.fit(X_train, y_train, sample_weight=train_weights)
-        models.append(('RF2', rf_model2))
-        
-        rf_model3 = RandomForestRegressor(
-            n_estimators=120,
-            max_depth=12,
-            min_samples_split=7,
-            min_samples_leaf=3,
-            random_state=456,
-            n_jobs=-1
-        )
-        rf_model3.fit(X_train, y_train, sample_weight=train_weights)
-        models.append(('RF3', rf_model3))
-
         # 預測未來 5 天 - 使用集成模型
         last_features = X_normalized[-1:].copy()
         last_close = float(y[-1])
@@ -194,78 +171,102 @@ def predict_next_5(stock, days, decay_factor):
         predicted_prices = [last_close]  # 包含最後一天的實際價格
         
         for i, date in enumerate(future_dates):
-            # 使用多個模型進行預測並取平均
-            day_predictions = []
-            for model_name, model in models:
-                pred = model.predict(current_features)[0]
-                # 添加小幅隨機變化來增加多樣性
-                variation = np.random.normal(0, pred * 0.005)  # 0.5% 的隨機變化
-                day_predictions.append(pred + variation)
-            
-            # 取加權平均（給主模型更高權重）
-            weights = [0.5, 0.3, 0.2]  # 主模型50%權重
-            ensemble_pred = np.average(day_predictions, weights=weights)
-            
-            # 添加基於歷史波動率的隨機變化
-            historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])  # 最近30天的波動率
-            volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.3)
-            final_pred = ensemble_pred + volatility_adjustment
-            
-            predictions[date] = float(final_pred)
-            predicted_prices.append(final_pred)
-            
-            # 為下一次預測更新特徵
-            if i < 4:  # 不是最後一次預測
-                new_features = current_features[0].copy()
-                
-                # 更新前一天收盤價相關特徵
-                prev_close_idx = feats.index('Prev_Close')
-                new_features[prev_close_idx] = (final_pred - X_mean[prev_close_idx]) / X_std[prev_close_idx]
-                
-                # 更新滯後特徵
-                for j in range(1, min(4, len(predicted_prices))):
-                    if f'Prev_Close_Lag{j}' in feats:
-                        lag_idx = feats.index(f'Prev_Close_Lag{j}')
-                        if len(predicted_prices) > j:
-                            lag_price = predicted_prices[-(j+1)]
-                            new_features[lag_idx] = (lag_price - X_mean[lag_idx]) / X_std[lag_idx]
-                
-                # 更新移動平均
-                if 'MA5' in feats and len(predicted_prices) >= 2:
-                    ma5_idx = feats.index('MA5')
-                    recent_ma5 = np.mean(predicted_prices[-min(5, len(predicted_prices)):])
-                    new_features[ma5_idx] = (recent_ma5 - X_mean[ma5_idx]) / X_std[ma5_idx]
-                
-                if 'MA10' in feats and len(predicted_prices) >= 2:
-                    ma10_idx = feats.index('MA10')
-                    recent_ma10 = np.mean(predicted_prices[-min(10, len(predicted_prices)):])
-                    new_features[ma10_idx] = (recent_ma10 - X_mean[ma10_idx]) / X_std[ma10_idx]
-                
-                # 更新波動率特徵
-                if 'Volatility' in feats and len(predicted_prices) >= 3:
-                    volatility_idx = feats.index('Volatility')
-                    recent_volatility = np.std(predicted_prices[-min(10, len(predicted_prices)):])
-                    new_features[volatility_idx] = (recent_volatility - X_mean[volatility_idx]) / X_std[volatility_idx]
-                
-                current_features = new_features.reshape(1, -1)
+            pred = rf_model.predict(current_features)[0]
+            predictions[date] = float(pred)
+            predicted_prices.append(pred)
 
         # 計算預測字典
         preds = {f'T+{i+1}': pred for i, pred in enumerate(predictions.values())}
 
-        # 驗證模型（使用主模型）
-        if len(X_val) > 0:
-            y_pred_val = models[0][1].predict(X_val)  # 使用第一個模型進行驗證
-            mse = mean_squared_error(y_val, y_pred_val)
-            rmse = np.sqrt(mse)
-            st.info(f"模型驗證 - RMSE: {rmse:.2f} (約 {rmse/last_close*100:.1f}%)")
-            
-            # 顯示特徵重要性
-            feature_importance = models[0][1].feature_importances_
-            top_features = sorted(zip(feats, feature_importance), key=lambda x: x[1], reverse=True)[:5]
-            st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
-        
         return last_close, predictions, preds
 
     except Exception as e:
         st.error(f"預測過程發生錯誤: {str(e)}")
         return None, None, None
+
+def get_trade_advice(last, preds):
+    """根據預測結果給出交易建議"""
+    if not preds:
+        return "無法判斷"
+    
+    price_changes = [preds[f'T+{d}'] - last for d in range(1, 6)]
+    avg_change = np.mean(price_changes)
+    change_percent = (avg_change / last) * 100
+    
+    if change_percent > 2:
+        return f"強烈買入 (預期上漲 {change_percent:.1f}%)"
+    elif change_percent > 0.5:
+        return f"買入 (預期上漲 {change_percent:.1f}%)"
+    elif change_percent < -2:
+        return f"強烈賣出 (預期下跌 {abs(change_percent):.1f}%)"
+    elif change_percent < -0.5:
+        return f"賣出 (預期下跌 {abs(change_percent):.1f}%)"
+    else:
+        return f"持有 (預期變動 {change_percent:.1f}%)"
+
+# Streamlit 介面
+st.title("📈 5 日股價預測系統")
+st.markdown("---")
+
+# 輸入區域
+col1, col2 = st.columns([2, 1])
+with col1:
+    code = st.text_input("請輸入股票代號", "2330.TW", help="例如：2330.TW (台積電)、AAPL (蘋果)")
+
+with col2:
+    mode = st.selectbox("預測模式", ["中期模式", "短期模式", "長期模式"])
+
+# 模式說明
+mode_info = {
+    "短期模式": ("使用 100 天歷史資料，高敏感度", 100, 0.008),
+    "中期模式": ("使用 200 天歷史資料，平衡敏感度", 200, 0.005),
+    "長期模式": ("使用 400 天歷史資料，低敏感度", 400, 0.002)
+}
+
+st.info(f"**{mode}**: {mode_info[mode][0]}")
+days, decay_factor = mode_info[mode][1], mode_info[mode][2]
+
+if st.button("🔮 開始預測", type="primary"):
+    with st.spinner("正在下載資料並進行預測..."):
+        last, forecast, preds = predict_next_5(code.strip().upper(), days, decay_factor)
+    
+    if last is None:
+        st.error("❌ 預測失敗，請檢查股票代號或網路連線")
+    else:
+        # 顯示結果
+        st.success("✅ 預測完成！")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("當前股價", f"${last:.2f}")
+            advice = get_trade_advice(last, preds)
+            
+            if "買入" in advice:
+                st.success(f"📈 **交易建議**: {advice}")
+            elif "賣出" in advice:
+                st.error(f"📉 **交易建議**: {advice}")
+            else:
+                st.warning(f"📊 **交易建議**: {advice}")
+        
+        with col2:
+            st.subheader("📅 未來 5 日預測")
+            for date, price in forecast.items():
+                change = price - last
+                change_pct = (change / last) * 100
+                
+                if change > 0:
+                    st.write(f"**{date}**: ${price:.2f} (+{change:.2f}, +{change_pct:.1f}%)")
+                else:
+                    st.write(f"**{date}**: ${price:.2f} ({change:.2f}, {change_pct:.1f}%)")
+        
+        # 繪製趨勢圖
+        st.subheader("📈 預測趨勢")
+        chart_data = pd.DataFrame({
+            '日期': ['今日'] + list(forecast.keys()),
+            '股價': [last] + list(forecast.values())
+        })
+        st.line_chart(chart_data.set_index('日期'))
+
+st.markdown("---")
+st.caption("⚠️ 此預測僅供參考，投資有風險，請謹慎決策")
