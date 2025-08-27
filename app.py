@@ -8,20 +8,18 @@ import ta
 from datetime import datetime, timedelta
 import time
 
-# 股票名稱映射字典（這部分可以擴展，添加更多對應）
-stock_name_dict = {
-    "2330.TW": "台積電",
-    "AAPL": "蘋果",
-    "GOOG": "谷歌",
-    "MSFT": "微軟",
-    # 這裡可以添加更多股票的映射
-}
-
 # 查詢股票名稱的函式
 def get_stock_name(stock_code):
-    # 如果輸入的是代號，返回對應的名稱
     stock_code = stock_code.strip().upper()
-    return stock_name_dict.get(stock_code, None)
+    if not stock_code.endswith('.TW'):
+        stock_code += '.TW'  # 如果未提供 .TW，則自動補全
+    try:
+        stock = yf.Ticker(stock_code)
+        info = stock.info
+        return info.get('longName', '未知股票名稱')
+    except Exception as e:
+        st.error(f"無法獲取股票名稱：{e}")
+        return None
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
@@ -242,7 +240,7 @@ st.markdown("---")
 # 輸入區域
 col1, col2 = st.columns([2, 1])
 with col1:
-    stock_input = st.text_input("請輸入股票代號或名稱", "2330.TW", help="例如：2330.TW (台積電)、AAPL (蘋果)")
+    stock_input = st.text_input("請輸入股票代號或名稱", "2330", help="例如：2330 (台積電)、AAPL (蘋果)")
 
 with col2:
     mode = st.selectbox("預測模式", ["中期模式", "短期模式", "長期模式"])
