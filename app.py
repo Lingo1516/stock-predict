@@ -61,6 +61,12 @@ def calculate_technical_indicators(df):
     # OBV (On-Balance Volume)
     df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
     df['OBV_MA'] = df['OBV'].rolling(window=10).mean()
+
+    # 新增 ATR (Average True Range)
+    df['ATR'] = df['TR'].rolling(window=14).mean()
+
+    # 新增 ROC (Rate of Change)
+    df['ROC'] = df['Close'].diff(periods=12) / df['Close'].shift(periods=12) * 100
     
     return df
 
@@ -133,7 +139,7 @@ def predict_next_5(stock, days, decay_factor):
         feats = [
             'Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
             'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
-            'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA'
+            'BB_Low', 'ADX', 'STOCH_K', 'STOCH_D', 'CCI', 'OBV', 'OBV_MA', 'ATR', 'ROC'
         ] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
         missing_feats = [f for f in feats if f not in df.columns]
