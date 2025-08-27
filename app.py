@@ -8,12 +8,10 @@ import ta
 from datetime import datetime
 import time
 
-# 股票代號到中文名稱簡易對照字典，可擴充
 stock_name_dict = {
     "2330.TW": "台灣積體電路製造股份有限公司",
     "2317.TW": "鴻海精密工業股份有限公司",
     "2412.TW": "中華電信股份有限公司",
-    # 更多可自行加入
 }
 
 @st.cache_data
@@ -25,11 +23,11 @@ def predict_next_5(stock, days, decay_factor):
         df, twii, sp = None, None, None
         for attempt in range(max_retries):
             try:
-                df = yf.download(stock, start=start, end=end + pd.Timedelta(days=1), 
+                df = yf.download(stock, start=start, end=end + pd.Timedelta(days=1),
                                interval="1d", auto_adjust=True, progress=False)
-                twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1), 
+                twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1),
                                  interval="1d", auto_adjust=True, progress=False)
-                sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1), 
+                sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1),
                                interval="1d", auto_adjust=True, progress=False)
                 if not (df.empty or twii.empty or sp.empty):
                     break
@@ -79,7 +77,7 @@ def predict_next_5(stock, days, decay_factor):
         else:
             df['Volume_MA'] = 0
         df['Volatility'] = close.rolling(10, min_periods=1).std()
-        feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD', 
+        feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
                  'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility'] + \
                 [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         missing_feats = [f for f in feats if f not in df.columns]
@@ -147,12 +145,12 @@ def predict_next_5(stock, days, decay_factor):
             day_predictions = []
             for model_name, model in models:
                 pred = model.predict(current_features)[0]
-                variation = np.random.normal(0, pred * 0.005)
+                variation = np.random.normal(0, pred * 0.002)  # 由0.005降為0.002
                 day_predictions.append(pred + variation)
             weights_ensemble = [0.5, 0.3, 0.2]
             ensemble_pred = np.average(day_predictions, weights=weights_ensemble)
             historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])
-            volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.3)
+            volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.1)  # 由0.3降為0.1
             final_pred = ensemble_pred + volatility_adjustment
             predictions[date] = float(final_pred)
             predicted_prices.append(final_pred)
@@ -164,7 +162,7 @@ def predict_next_5(stock, days, decay_factor):
                     if f'Prev_Close_Lag{j}' in feats:
                         lag_idx = feats.index(f'Prev_Close_Lag{j}')
                         if len(predicted_prices) > j:
-                            lag_price = predicted_prices[-(j+1)]
+                            lag_price = predicted_prices[-(j + 1)]
                             new_features[lag_idx] = (lag_price - X_mean[lag_idx]) / X_std[lag_idx]
                 if 'MA5' in feats and len(predicted_prices) >= 2:
                     ma5_idx = feats.index('MA5')
@@ -179,12 +177,12 @@ def predict_next_5(stock, days, decay_factor):
                     recent_volatility = np.std(predicted_prices[-min(10, len(predicted_prices)):])
                     new_features[volatility_idx] = (recent_volatility - X_mean[volatility_idx]) / X_std[volatility_idx]
                 current_features = new_features.reshape(1, -1)
-        preds = {f'T+{i+1}': pred for i, pred in enumerate(predictions.values())}
+        preds = {f'T+{i + 1}': pred for i, pred in enumerate(predictions.values())}
         if len(X_val) > 0:
             y_pred_val = models[0][1].predict(X_val)
             mse = mean_squared_error(y_val, y_pred_val)
             rmse = np.sqrt(mse)
-            st.info(f"模型驗證 - RMSE: {rmse:.2f} (約 {rmse/last_close*100:.1f}%)")
+            st.info(f"模型驗證 - RMSE: {rmse:.2f} (約 {rmse / last_close * 100:.1f}%)")
             feature_importance = models[0][1].feature_importances_
             top_features = sorted(zip(feats, feature_importance), key=lambda x: x[1], reverse=True)[:5]
             st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
@@ -210,8 +208,6 @@ def get_trade_advice(last, preds):
     else:
         return f"持有 (預期變動 {change_percent:.1f}%)"
 
-
-# Streamlit UI
 st.title("📈 5 日股價預測系統")
 st.markdown("---")
 
@@ -241,7 +237,6 @@ if st.button("🔮 開始預測", type="primary"):
     else:
         st.success("✅ 預測完成！")
 
-        # 取得並顯示中文及英文名稱
         try:
             ticker_info = yf.Ticker(full_code).info
             company_name = ticker_info.get('shortName') or ticker_info.get('longName') or "無法取得名稱"
@@ -271,7 +266,6 @@ if st.button("🔮 開始預測", type="primary"):
                 else:
                     st.write(f"**{date}**: ${price:.2f} ({change:.2f}, {change_pct:.1f}%)")
 
-            # 顯示最佳買賣點日期與價格
             min_date = min(forecast, key=forecast.get)
             min_price = forecast[min_date]
             max_date = max(forecast, key=forecast.get)
