@@ -299,7 +299,6 @@ stock_name_dict = {
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
-    # 優化下載邏輯，確保在下載失敗時不會報錯
     try:
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
@@ -308,14 +307,12 @@ def predict_next_5(stock, days, decay_factor):
         sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1), interval="1d", auto_adjust=True, progress=False)
         
         if df.empty or twii.empty or sp.empty:
-            # 如果下載失敗，直接返回空的資料
             return None, None, None, pd.DataFrame()
             
     except Exception as e:
         st.error(f"下載資料時發生錯誤: {str(e)}")
         return None, None, None, pd.DataFrame()
 
-    # 處理欄位名稱
     for frame in [df, twii, sp]:
         if isinstance(frame.columns, pd.MultiIndex):
             frame.columns = [col[0] for col in frame.columns]
@@ -328,7 +325,6 @@ def predict_next_5(stock, days, decay_factor):
     df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
     df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
 
-    # 計算技術指標
     df['MA5'] = close.rolling(5, min_periods=1).mean()
     df['MA10'] = close.rolling(10, min_periods=1).mean()
     df['MA20'] = close.rolling(20, min_periods=1).mean()
@@ -352,7 +348,6 @@ def predict_next_5(stock, days, decay_factor):
     df['Volume_MA'] = df['Volume'].rolling(10, min_periods=1).mean() if 'Volume' in df.columns else 0
     df['Volatility'] = close.rolling(10, min_periods=1).std()
     
-    # 新增底部/頭部策略所需指標
     df['K'], df['D'] = calc_kd(df, CFG.stoch_k, CFG.stoch_d, CFG.stoch_smooth)
     df['ATR'] = calc_atr(df, CFG.atr_period)
     df['RecentLow'] = df['Close'].rolling(CFG.bottom_lookback, min_periods=1).min()
@@ -361,18 +356,15 @@ def predict_next_5(stock, days, decay_factor):
     df['PriorLow'] = df['Close'].shift(1).rolling(CFG.lower_low_lookback, min_periods=1).min()
     df['VOL_MA'] = df['Volume'].rolling(CFG.volume_ma, min_periods=1).mean()
 
-    # 準備特徵
     feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
              'MACD_SIGNAL', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
              'BB_Low', 'ADX'] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
     
     df_clean = df[feats + ['Close']].dropna()
     
-    # 如果數據量不足，返回完整數據，讓後續的 "新上市" 策略處理
     if len(df_clean) < 30:
         return None, None, None, df
 
-    # 訓練模型
     X = df_clean[feats].values
     y = df_clean['Close'].values
     X_mean = np.mean(X, axis=0)
@@ -395,7 +387,6 @@ def predict_next_5(stock, days, decay_factor):
         model.fit(X_train, y_train, sample_weight=train_weights)
         models.append(model)
 
-    # 進行預測
     last_features_normalized = X_normalized[-1:].copy()
     last_close = float(y[-1])
     predictions = {}
@@ -407,12 +398,10 @@ def predict_next_5(stock, days, decay_factor):
         day_predictions = [model.predict(current_features_normalized)[0] for model in models]
         ensemble_pred = np.average(day_predictions, weights=[0.5, 0.3, 0.2])
         
-        # 加入波動性調整
         historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])
         volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.05)
         final_pred = ensemble_pred + volatility_adjustment
         
-        # 限制價格範圍
         max_deviation_pct = 0.10
         upper_limit = last_close * (1 + max_deviation_pct)
         lower_limit = last_close * (1 - max_deviation_pct)
@@ -421,10 +410,8 @@ def predict_next_5(stock, days, decay_factor):
         predictions[date.date()] = float(final_pred)
         predicted_prices.append(final_pred)
 
-        # 更新下一天的特徵 (迭代預測)
         if i < len(future_dates) - 1:
             new_features = current_features_normalized[0].copy()
-            # 遍歷所有需要更新的特徵
             for feat_name in ['Prev_Close', 'MA5', 'MA10', 'Volatility'] + [f'Prev_Close_Lag{j}' for j in range(1, 4)]:
                 if feat_name in feats:
                     idx = feats.index(feat_name)
@@ -449,7 +436,6 @@ def predict_next_5(stock, days, decay_factor):
     
     preds = {f'T+{i + 1}': p for i, p in enumerate(predictions.values())}
 
-    # 顯示模型驗證資訊
     if len(X_val) > 0:
         y_pred_val = models[0].predict(X_val)
         rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
@@ -527,8 +513,8 @@ if st.button("🔮 開始分析", type="primary", use_container_width=True):
 
         # --- AI 預測結果區塊 ---
         st.subheader("🤖 AI 智慧預測")
-        main_col1, main_col2 = st.columns([1, 2])
         if not is_low_volume_stock:
+            main_col1, main_col2 = st.columns([1, 2])
             with main_col1:
                 st.metric("最新收盤價", f"${last:.2f}")
                 advice = get_trade_advice(last, preds)
@@ -565,42 +551,42 @@ if st.button("🔮 開始分析", type="primary", use_container_width=True):
                         '漲跌幅 (%)': '{:+.2f}%'
                     }).apply(lambda x: x.map(color_change), subset=['漲跌', '漲跌幅 (%)']), use_container_width=True)
 
-                st.subheader("📈 預測趨勢圖")
-                if forecast and df_with_indicators is not None and not df_with_indicators.empty:
-                    chart_data = pd.DataFrame({
-                        '日期': [df_with_indicators.index[-1].date()] + list(forecast.keys()),
-                        '股價': [last] + list(forecast.values())
-                    })
-                    st.line_chart(chart_data.set_index('日期'))
-            else:
-                st.warning("⚠️ 數據量不足，無法執行 AI 預測模型。")
+            st.subheader("📈 預測趨勢圖")
+            if forecast and df_with_indicators is not None and not df_with_indicators.empty:
+                chart_data = pd.DataFrame({
+                    '日期': [df_with_indicators.index[-1].date()] + list(forecast.keys()),
+                    '股價': [last] + list(forecast.values())
+                })
+                st.line_chart(chart_data.set_index('日期'))
+        else:
+            st.warning("⚠️ 數據量不足，無法執行 AI 預測模型。")
 
-            st.markdown("---")
+        st.markdown("---")
 
-            # --- 技術分析訊號區塊 ---
-            st.subheader("🔍 技術分析訊號")
-            
-            # 執行買/賣點分析
-            if not is_low_volume_stock:
-                bottom_fishing_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="normal")
-                summary_col1, summary_col2 = st.columns([1, 2])
-                with summary_col1:
-                    st.metric(f"是否符合{bottom_fishing_summary['動作']}訊號", "✅ 符合" if bottom_fishing_summary["是否符合訊號"] else "❌ 不符合")
-                    st.write(f"**理由**: {bottom_fishing_summary['理由']}")
-                with summary_col2:
-                    st.write(f"**{bottom_fishing_summary['風險']}**: ${bottom_fishing_summary['建議停損']:.2f} (ATR ≈ {bottom_fishing_summary['估計ATR']:.2f})")
-                    st.write(f"**建議{bottom_fishing_summary['動作']}股數**: {bottom_fishing_summary['建議股數']:,} 股")
-            else:
-                # 執行新上市/低成交量股票的分析
-                low_volume_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="low_volume")
-                st.warning("ℹ️ 數據量不足，已切換至「新上市/低成交量」簡易分析模式。")
-                summary_col1, summary_col2 = st.columns([1, 2])
-                with summary_col1:
-                    st.metric(f"是否符合{low_volume_summary['動作']}訊號", "✅ 符合" if low_volume_summary["是否符合訊號"] else "❌ 不符合")
-                    st.write(f"**理由**: {low_volume_summary['理由']}")
-                with summary_col2:
-                    st.write(f"**分析註記**: {low_volume_summary['風險']}")
-                    st.write(f"**風險控管**：此模式未提供基於ATR的停損建議，請自行評估。")
+        # --- 技術分析訊號區塊 ---
+        st.subheader("🔍 技術分析訊號")
+        
+        # 執行買/賣點分析
+        if not is_low_volume_stock:
+            bottom_fishing_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="normal")
+            summary_col1, summary_col2 = st.columns([1, 2])
+            with summary_col1:
+                st.metric(f"是否符合{bottom_fishing_summary['動作']}訊號", "✅ 符合" if bottom_fishing_summary["是否符合訊號"] else "❌ 不符合")
+                st.write(f"**理由**: {bottom_fishing_summary['理由']}")
+            with summary_col2:
+                st.write(f"**{bottom_fishing_summary['風險']}**: ${bottom_fishing_summary['建議停損']:.2f} (ATR ≈ {bottom_fishing_summary['估計ATR']:.2f})")
+                st.write(f"**建議{bottom_fishing_summary['動作']}股數**: {bottom_fishing_summary['建議股數']:,} 股")
+        else:
+            # 執行新上市/低成交量股票的分析
+            low_volume_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="low_volume")
+            st.warning("ℹ️ 數據量不足，已切換至「新上市/低成交量」簡易分析模式。")
+            summary_col1, summary_col2 = st.columns([1, 2])
+            with summary_col1:
+                st.metric(f"是否符合{low_volume_summary['動作']}訊號", "✅ 符合" if low_volume_summary["是否符合訊號"] else "❌ 不符合")
+                st.write(f"**理由**: {low_volume_summary['理由']}")
+            with summary_col2:
+                st.write(f"**分析註記**: {low_volume_summary['風險']}")
+                st.write(f"**風險控管**：此模式未提供基於ATR的停損建議，請自行評估。")
 
             st.markdown("---")
 
