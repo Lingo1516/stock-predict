@@ -26,7 +26,6 @@ stock_name_dict = {
     "2603.TW": "長榮",
     "2881.TW": "富邦金",
     "2882.TW": "國泰金",
-    "6873.TW": "晶彩科",
 }
 
 # --------------------------------------------------------------------------
@@ -165,13 +164,11 @@ def predict_next_5(stock, days, decay_factor):
         st.error(f"預測過程發生錯誤: {str(e)}")
         return None, None
 
-@st.cache_data(ttl=3600) # 快取1小時，因為盤後資料一天只更新一次
+@st.cache_data(ttl=3600) # 快取1小時
 def get_institutional_data(stock_code):
     """使用 FinMind API 抓取最新的三大法人與融資融券資料"""
     try:
         api = DataLoader()
-        # 您可以在 FinMind 官網免費註冊取得 token，以獲得更高的 API 使用額度
-        # api.login_by_token(api_token='YOUR_FINMIND_API_TOKEN') 
         today_str = dt.datetime.now().strftime("%Y-%m-%d")
         start_str = (dt.datetime.now() - dt.timedelta(days=30)).strftime("%Y-%m-%d")
         stock_id = stock_code.replace(".TW", "")
@@ -244,7 +241,6 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
                 forecast_df['漲跌'] = forecast_df['預測股價'] - last_close
                 forecast_df['漲跌幅 (%)'] = (forecast_df['漲跌'] / last_close) * 100
                 
-                # 使用樣式讓表格更易讀
                 def color_change(val):
                     color = 'red' if val > 0 else 'green' if val < 0 else 'gray'
                     return f'color: {color}'
@@ -258,56 +254,61 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
         with main_col2:
             st.header("📈 預測趨勢圖")
             if forecast:
-                # 取得最新收盤價的日期
                 df_for_date, _, _ = get_market_data(full_code, dt.date.today() - dt.timedelta(days=10), dt.date.today() + dt.timedelta(days=1))
                 if df_for_date is not None and not df_for_date.empty:
                     latest_date = pd.to_datetime(df_for_date.index[-1].date())
-
                     chart_data = pd.DataFrame({
                         '日期': [latest_date] + [pd.to_datetime(d) for d in forecast.keys()],
                         '股價': [last_close] + list(forecast.values())
                     })
                     st.line_chart(chart_data.set_index('日期'))
         
-        # --- 新增的籌碼資訊顯示區塊 ---
+        # --- 顯示籌碼資訊 ---
         st.markdown("---")
         st.header("📊 最新籌碼分佈 (盤後資料)")
 
         latest_institutional, latest_margin = get_institutional_data(full_code)
 
         if latest_institutional is not None:
-            data_date = latest_institutional['date']
-            st.caption(f"資料日期：{data_date}")
+            try:
+                data_date = latest_institutional['date']
+                st.caption(f"資料日期：{data_date}")
 
-            # --- 修正開始：將欄位名稱改為小寫 ---
-            foreign_net = latest_institutional['foreign_investor_diff']
-            trust_net = latest_institutional['investment_trust_diff']
-            dealer_net = latest_institutional['dealer_diff']
-            # --- 修正結束 ---
-            
-            total_institutional = foreign_net + trust_net + dealer_net
-            
-            chip_col1, chip_col2, chip_col3, chip_col4 = st.columns(4)
-            with chip_col1:
-                st.metric("外資買賣超 (張)", f"{foreign_net:,.0f}")
-            with chip_col2:
-                st.metric("投信買賣超 (張)", f"{trust_net:,.0f}")
-            with chip_col3:
-                st.metric("自營商買賣超 (張)", f"{dealer_net:,.0f}")
-            
-            if latest_margin is not None:
-                # --- 修正開始：將欄位名稱改為小寫 ---
-                margin_balance = latest_margin['margin_purchase_balance']
+                # --- 修正開始：使用 FinMind 最新的欄位名稱 ---
+                foreign_net = latest_institutional['Foreign_Investor_Buy_Sell']
+                trust_net = latest_institutional['Investment_Trust_Buy_Sell']
+                dealer_net = latest_institutional['Dealer_Buy_Sell']
                 # --- 修正結束 ---
-                with chip_col4:
-                    st.metric("融資餘額 (張)", f"{margin_balance:,.0f}")
-            
-            if total_institutional > 0:
-                st.success(f"📈 三大法人合計： **買超 {total_institutional:,.0f} 張**")
-            elif total_institutional < 0:
-                st.error(f"📉 三大法人合計： **賣超 {abs(total_institutional):,.0f} 張**")
-            else:
-                st.info(f"三大法人合計： **持平**")
+                
+                total_institutional = foreign_net + trust_net + dealer_net
+                
+                chip_col1, chip_col2, chip_col3, chip_col4 = st.columns(4)
+                with chip_col1:
+                    st.metric("外資買賣超 (股)", f"{foreign_net:,.0f}")
+                with chip_col2:
+                    st.metric("投信買賣超 (股)", f"{trust_net:,.0f}")
+                with chip_col3:
+                    st.metric("自營商買賣超 (股)", f"{dealer_net:,.0f}")
+                
+                if latest_margin is not None:
+                    # --- 修正開始：使用 FinMind 最新的欄位名稱 ---
+                    margin_balance = latest_margin['Margin_Purchase_Balance']
+                    # --- 修正結束 ---
+                    with chip_col4:
+                        st.metric("融資餘額 (股)", f"{margin_balance:,.0f}")
+                
+                if total_institutional > 0:
+                    st.success(f"📈 三大法人合計： **買超 {total_institutional:,.0f} 股**")
+                elif total_institutional < 0:
+                    st.error(f"📉 三大法人合計： **賣超 {abs(total_institutional):,.0f} 股**")
+                else:
+                    st.info(f"三大法人合計： **持平**")
+
+            except KeyError as e:
+                st.error(f"顯示籌碼時發生欄位錯誤：找不到欄位 {e}。這可能是因為 FinMind API 更新了欄位名稱。")
+                st.info("以下是目前 API 回傳的所有可用欄位，請根據這些資訊更新程式碼：")
+                st.json(latest_institutional.index.to_list()) # 直接列出所有可用的欄位名稱
+
         else:
             st.warning("今日盤後籌碼資料尚未公佈，或查無該股票籌碼資料。")
             
