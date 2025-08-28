@@ -37,41 +37,28 @@ def calculate_technical_indicators(df, twii_close):
     df['MA5'] = df['Close'].rolling(5, min_periods=1).mean()
     df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
     df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
-
-    # RSI (相對強弱指數)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
-
-    # MACD (指數平滑異同移動平均線)
     exp12 = df['Close'].ewm(span=12, adjust=False).mean()
     exp26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-
-    # 布林通道 (Bollinger Bands)
     bb_window = 20
     middle_band = df['Close'].rolling(window=bb_window).mean()
     std_dev = df['Close'].rolling(window=bb_window).std()
     df['BB_High'] = middle_band + (std_dev * 2)
     df['BB_Low'] = middle_band - (std_dev * 2)
-    
-    # ATR (平均真實波幅)
     df['TR'] = np.maximum.reduce([
         df['High'] - df['Low'],
         abs(df['High'] - df['Close'].shift(1)),
         abs(df['Low'] - df['Close'].shift(1))
     ])
     df['ATR'] = df['TR'].ewm(span=14, adjust=False).mean()
-    
-    # OBV (能量潮指標)
     df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-    
-    # 將大盤指數加入
     df['TWII_Close'] = twii_close.reindex(df.index, method='ffill').fillna(method='bfill')
-    
     return df
 
 def generate_mock_institutional_data(df):
@@ -84,112 +71,120 @@ def generate_mock_institutional_data(df):
     institutional_data['net_buy_sell'] = institutional_data['net_buy_sell'] * (1 + twii_change.fillna(0) * 5)
     return institutional_data
 
-@st.cache_data(ttl=600) # 快取10分鐘，避免重複下載
+@st.cache_data(ttl=600)
 def get_market_data(stock, start_date, end_date):
     """下載股票與指數資料"""
     df = yf.download(stock, start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
     twii = yf.download("^TWII", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
     sp = yf.download("^GSPC", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
-
-    # 處理 yfinance 可能回傳 MultiIndex 欄位的問題，將其 "壓平"
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
     if isinstance(twii.columns, pd.MultiIndex):
         twii.columns = twii.columns.droplevel(1)
     if isinstance(sp.columns, pd.MultiIndex):
         sp.columns = sp.columns.droplevel(1)
-
     if df.empty or twii.empty or sp.empty:
         return None, None, None
-        
     return df, twii, sp
 
-@st.cache_data(ttl=1800) # 快取30分鐘
+@st.cache_data(ttl=1800)
 def predict_next_5(stock, days, decay_factor):
     """主預測函式"""
     try:
         end = pd.Timestamp(dt.date.today()) + pd.Timedelta(days=1)
         start = end - pd.Timedelta(days=days)
-        
         df, twii, sp = get_market_data(stock, start, end)
-
         if df is None or len(df) < 50:
             st.error(f"資料不足 (僅 {len(df) if df is not None else 0} 筆)，無法進行有效預測。")
             return None, None
-
         df = calculate_technical_indicators(df, twii['Close'])
         df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
-        
         institutional_data = generate_mock_institutional_data(df)
         df = df.join(institutional_data, how='left')
-
         df['Prev_Close'] = df['Close'].shift(1)
         df['Volume_MA'] = df['Volume'].rolling(10, min_periods=1).mean()
         df['Volatility'] = df['Close'].rolling(10, min_periods=1).std()
-
         feats = [
             'Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
             'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
             'BB_Low', 'ATR', 'OBV', 'net_buy_sell', '5d_cum'
         ]
-        
         df_clean = df[feats + ['Close']].fillna(method='ffill').fillna(0)
-        
         X = df_clean[feats].values
         y = df_clean['Close'].values
-
         weights = np.exp(-decay_factor * np.arange(len(X))[::-1])
         weights /= np.sum(weights)
-
         model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42, n_jobs=-1)
         model.fit(X, y, sample_weight=weights)
-
         last_features = df_clean[feats].iloc[-1:].values
         last_close = float(y[-1])
-        
         predictions = {}
         current_features = last_features.copy()
         future_dates = pd.bdate_range(start=df.index[-1], periods=6)[1:]
-
         for i in range(5):
             pred = model.predict(current_features)[0]
             predictions[future_dates[i].date()] = float(pred)
-            
-            # 迭代更新下一天的特徵 (簡易版)
             current_features[0][feats.index('Prev_Close')] = pred
-        
         return last_close, predictions
-
     except Exception as e:
         st.error(f"預測過程發生錯誤: {str(e)}")
         return None, None
 
-@st.cache_data(ttl=3600) # 快取1小時
+# --- 重寫開始：完全重寫 `get_institutional_data` 以適應新的 API 格式 ---
+@st.cache_data(ttl=3600)
 def get_institutional_data(stock_code):
-    """使用 FinMind API 抓取最新的三大法人與融資融券資料"""
+    """使用 FinMind API 抓取並處理最新的三大法人與融資融券資料"""
     try:
         api = DataLoader()
         today_str = dt.datetime.now().strftime("%Y-%m-%d")
-        start_str = (dt.datetime.now() - dt.timedelta(days=30)).strftime("%Y-%m-%d")
+        # 多抓幾天的資料以防假日
+        start_str = (dt.datetime.now() - dt.timedelta(days=10)).strftime("%Y-%m-%d")
         stock_id = stock_code.replace(".TW", "")
 
+        # 抓取三大法人資料
         df_institutional = api.taiwan_stock_institutional_investors(
             stock_id=stock_id, start_date=start_str, end_date=today_str
         )
+        
+        # 抓取融資融券資料
         df_margin = api.taiwan_stock_margin_purchase_short_sale(
             stock_id=stock_id, start_date=start_str, end_date=today_str
         )
 
         if df_institutional.empty: 
             return None, None
+
+        # 找到最新的交易日期
+        latest_date = df_institutional['date'].max()
+        latest_data = df_institutional[df_institutional['date'] == latest_date]
+
+        # 建立一個字典來存放整理後的資料
+        institutional_summary = {'date': latest_date}
         
-        latest_institutional = df_institutional.iloc[-1]
+        # 透過 'name' 欄位來區分不同法人
+        for _, row in latest_data.iterrows():
+            investor_name = row['name']
+            net_buy_sell = row['buy'] - row['sell']
+            
+            if '外資' in investor_name:
+                institutional_summary['foreign_net'] = net_buy_sell
+            elif '投信' in investor_name:
+                institutional_summary['trust_net'] = net_buy_sell
+            elif '自營商' in investor_name:
+                # 自營商可能有多筆(自行買賣、避險)，需要累加
+                if 'dealer_net' in institutional_summary:
+                    institutional_summary['dealer_net'] += net_buy_sell
+                else:
+                    institutional_summary['dealer_net'] = net_buy_sell
+        
+        # 處理融資餘額
         latest_margin = df_margin.iloc[-1] if not df_margin.empty else None
         
-        return latest_institutional, latest_margin
+        return institutional_summary, latest_margin
     except Exception as e:
         st.warning(f"抓取籌碼資料時發生錯誤: {e}。可能是API請求次數達到上限或FinMind服務暫時中斷。")
         return None, None
+# --- 重寫結束 ---
 
 # --------------------------------------------------------------------------
 # Streamlit App 介面佈局
@@ -199,7 +194,6 @@ st.set_page_config(page_title="AI 股價預測系統", layout="wide")
 st.title("📈 AI 智慧股價預測系統")
 st.markdown("---")
 
-# --- 輸入區域 ---
 col1, col2 = st.columns([2, 1])
 with col1:
     code = st.text_input("請輸入股票代號 (例如 2330)", "2330")
@@ -229,22 +223,18 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
         
         company_name = stock_name_dict.get(full_code, "未知的公司")
         
-        # --- 顯示預測結果 ---
         main_col1, main_col2 = st.columns([1, 1])
         with main_col1:
             st.header(f"{company_name} ({full_code})")
             st.metric("最新收盤價", f"${last_close:,.2f}")
-            
             st.subheader("📅 未來 5 日股價預測")
             if forecast:
                 forecast_df = pd.DataFrame(list(forecast.items()), columns=['日期', '預測股價'])
                 forecast_df['漲跌'] = forecast_df['預測股價'] - last_close
                 forecast_df['漲跌幅 (%)'] = (forecast_df['漲跌'] / last_close) * 100
-                
                 def color_change(val):
                     color = 'red' if val > 0 else 'green' if val < 0 else 'gray'
                     return f'color: {color}'
-                
                 st.dataframe(forecast_df.style.format({
                     '預測股價': '${:,.2f}',
                     '漲跌': '{:+.2f}',
@@ -263,52 +253,47 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
                     })
                     st.line_chart(chart_data.set_index('日期'))
         
-        # --- 顯示籌碼資訊 ---
         st.markdown("---")
         st.header("📊 最新籌碼分佈 (盤後資料)")
 
-        latest_institutional, latest_margin = get_institutional_data(full_code)
+        institutional_summary, latest_margin = get_institutional_data(full_code)
 
-        if latest_institutional is not None:
-            try:
-                data_date = latest_institutional['date']
-                st.caption(f"資料日期：{data_date}")
+        if institutional_summary:
+            data_date = institutional_summary.get('date', 'N/A')
+            st.caption(f"資料日期：{data_date}")
 
-                # --- 修正開始：使用 FinMind 最新的欄位名稱 ---
-                foreign_net = latest_institutional['Foreign_Investor_Buy_Sell']
-                trust_net = latest_institutional['Investment_Trust_Buy_Sell']
-                dealer_net = latest_institutional['Dealer_Buy_Sell']
-                # --- 修正結束 ---
-                
-                total_institutional = foreign_net + trust_net + dealer_net
-                
-                chip_col1, chip_col2, chip_col3, chip_col4 = st.columns(4)
-                with chip_col1:
-                    st.metric("外資買賣超 (股)", f"{foreign_net:,.0f}")
-                with chip_col2:
-                    st.metric("投信買賣超 (股)", f"{trust_net:,.0f}")
-                with chip_col3:
-                    st.metric("自營商買賣超 (股)", f"{dealer_net:,.0f}")
-                
-                if latest_margin is not None:
-                    # --- 修正開始：使用 FinMind 最新的欄位名稱 ---
+            # --- 重寫開始：從新的資料結構中獲取數據 ---
+            # 使用 .get(key, 0) 來避免因為某法人當天沒交易而產生錯誤
+            foreign_net = institutional_summary.get('foreign_net', 0)
+            trust_net = institutional_summary.get('trust_net', 0)
+            dealer_net = institutional_summary.get('dealer_net', 0)
+            total_institutional = foreign_net + trust_net + dealer_net
+            # --- 重寫結束 ---
+            
+            chip_col1, chip_col2, chip_col3, chip_col4 = st.columns(4)
+            with chip_col1:
+                st.metric("外資買賣超 (股)", f"{foreign_net:,.0f}")
+            with chip_col2:
+                st.metric("投信買賣超 (股)", f"{trust_net:,.0f}")
+            with chip_col3:
+                st.metric("自營商買賣超 (股)", f"{dealer_net:,.0f}")
+            
+            if latest_margin is not None:
+                try:
                     margin_balance = latest_margin['Margin_Purchase_Balance']
-                    # --- 修正結束 ---
                     with chip_col4:
                         st.metric("融資餘額 (股)", f"{margin_balance:,.0f}")
-                
-                if total_institutional > 0:
-                    st.success(f"📈 三大法人合計： **買超 {total_institutional:,.0f} 股**")
-                elif total_institutional < 0:
-                    st.error(f"📉 三大法人合計： **賣超 {abs(total_institutional):,.0f} 股**")
-                else:
-                    st.info(f"三大法人合計： **持平**")
+                except KeyError:
+                     margin_balance = latest_margin.get('margin_purchase_balance', 0)
+                     with chip_col4:
+                        st.metric("融資餘額 (股)", f"{margin_balance:,.0f}")
 
-            except KeyError as e:
-                st.error(f"顯示籌碼時發生欄位錯誤：找不到欄位 {e}。這可能是因為 FinMind API 更新了欄位名稱。")
-                st.info("以下是目前 API 回傳的所有可用欄位，請根據這些資訊更新程式碼：")
-                st.json(latest_institutional.index.to_list()) # 直接列出所有可用的欄位名稱
-
+            if total_institutional > 0:
+                st.success(f"📈 三大法人合計： **買超 {total_institutional:,.0f} 股**")
+            elif total_institutional < 0:
+                st.error(f"📉 三大法人合計： **賣超 {abs(total_institutional):,.0f} 股**")
+            else:
+                st.info(f"三大法人合計： **持平**")
         else:
             st.warning("今日盤後籌碼資料尚未公佈，或查無該股票籌碼資料。")
             
