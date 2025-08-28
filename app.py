@@ -215,14 +215,17 @@ def predict_next_5(stock, days, decay_factor):
         df['MA_L'] = df['MA60']
         df['MA_S_SLOPE'] = df['MA_S'] - df['MA_S'].shift(5) # 簡單斜率
 
-        df['RSI'] = ta.momentum.RSIIndicator(close, n=14).rsi()
+        # --- 修正處：將 'n=14' 改為 'window=14' ---
+        df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
+        # --- 修正結束 ---
+        
         macd = ta.trend.MACD(close)
         df['MACD'] = macd.macd_diff() # 使用 MACD 柱狀圖來判斷
         df['MACD_SIGNAL'] = macd.macd_signal()
-        bb_indicator = BollingerBands(close, n=20, ndev=2)
+        bb_indicator = BollingerBands(close, window=20, window_dev=2) # 修正參數名稱
         df['BB_High'] = bb_indicator.bollinger_hband()
         df['BB_Low'] = bb_indicator.bollinger_lband()
-        adx_indicator = ADXIndicator(df['High'], df['Low'], close, n=14)
+        adx_indicator = ADXIndicator(df['High'], df['Low'], close, window=14) # 修正參數名稱
         df['ADX'] = adx_indicator.adx()
         df['Prev_Close'] = close.shift(1)
         for i in range(1, 4):
