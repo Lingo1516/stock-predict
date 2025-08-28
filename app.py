@@ -299,176 +299,166 @@ stock_name_dict = {
 
 @st.cache_data
 def predict_next_5(stock, days, decay_factor):
+    # 優化下載邏輯，確保在下載失敗時不會報錯
     try:
         end = pd.Timestamp(datetime.today().date())
         start = end - pd.Timedelta(days=days)
-        max_retries = 3
-        df, twii, sp = None, None, None
-
-        for attempt in range(max_retries):
-            try:
-                # 下載資料
-                df = yf.download(stock, start=start, end=end + pd.Timedelta(days=1), interval="1d", auto_adjust=True, progress=False)
-                twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1), interval="1d", auto_adjust=True, progress=False)
-                sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1), interval="1d", auto_adjust=True, progress=False)
-                if not (df.empty or twii.empty or sp.empty):
-                    break
-            except Exception as e:
-                st.warning(f"嘗試 {attempt + 1}/{max_retries} 下載失敗: {e}")
-                time.sleep(2)
-
-        if attempt == max_retries - 1 and (df is None or df.empty):
-            st.error(f"無法下載資料：{stock}")
-            return None, None, None, None
-
-        # 處理欄位名稱
-        for frame in [df, twii, sp]:
-            if isinstance(frame.columns, pd.MultiIndex):
-                frame.columns = [col[0] for col in frame.columns]
-
-        if not all(col in df.columns for col in ['High', 'Low', 'Close']):
-            st.error("下載的資料缺少 'High', 'Low', 或 'Close' 欄位。")
-            return None, None, None, None
-
-        close = df['Close']
-        df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
-        df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
-
-        # 計算技術指標
-        df['MA5'] = close.rolling(5, min_periods=1).mean()
-        df['MA10'] = close.rolling(10, min_periods=1).mean()
-        df['MA20'] = close.rolling(20, min_periods=1).mean()
-        df['MA60'] = close.rolling(60, min_periods=1).mean()
-        df['MA_S'] = df['MA20']
-        df['MA_L'] = df['MA60']
-        df['MA_S_SLOPE'] = df['MA_S'] - df['MA_S'].shift(5)
-
-        df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
-        macd = ta.trend.MACD(close)
-        df['MACD'] = macd.macd_diff()
-        df['MACD_SIGNAL'] = macd.macd_signal()
-        bb_indicator = BollingerBands(close, window=20, window_dev=2)
-        df['BB_High'] = bb_indicator.bollinger_hband()
-        df['BB_Low'] = bb_indicator.bollinger_lband()
-        adx_indicator = ADXIndicator(df['High'], df['Low'], close, window=14)
-        df['ADX'] = adx_indicator.adx()
-        df['Prev_Close'] = close.shift(1)
-        for i in range(1, 4):
-            df[f'Prev_Close_Lag{i}'] = close.shift(i)
-        df['Volume_MA'] = df['Volume'].rolling(10, min_periods=1).mean() if 'Volume' in df.columns else 0
-        df['Volatility'] = close.rolling(10, min_periods=1).std()
+        df = yf.download(stock, start=start, end=end + pd.Timedelta(days=1), interval="1d", auto_adjust=True, progress=False)
+        twii = yf.download("^TWII", start=start, end=end + pd.Timedelta(days=1), interval="1d", auto_adjust=True, progress=False)
+        sp = yf.download("^GSPC", start=start, end=end + pd.Timedelta(days=1), interval="1d", auto_adjust=True, progress=False)
         
-        # 新增底部/頭部策略所需指標
-        df['K'], df['D'] = calc_kd(df, CFG.stoch_k, CFG.stoch_d, CFG.stoch_smooth)
-        df['ATR'] = calc_atr(df, CFG.atr_period)
-        df['RecentLow'] = df['Close'].rolling(CFG.bottom_lookback, min_periods=1).min()
-        df['PriorHigh'] = df['Close'].shift(1).rolling(CFG.higher_high_lookback, min_periods=1).max()
-        df['RecentHigh'] = df['Close'].rolling(CFG.top_lookback, min_periods=1).max()
-        df['PriorLow'] = df['Close'].shift(1).rolling(CFG.lower_low_lookback, min_periods=1).min()
-        df['VOL_MA'] = df['Volume'].rolling(CFG.volume_ma, min_periods=1).mean()
+        if df.empty or twii.empty or sp.empty:
+            # 如果下載失敗，直接返回空的資料
+            return None, None, None, pd.DataFrame()
+            
+    except Exception as e:
+        st.error(f"下載資料時發生錯誤: {str(e)}")
+        return None, None, None, pd.DataFrame()
 
-        # 準備特徵
-        feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
-                 'MACD_SIGNAL', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
-                 'BB_Low', 'ADX'] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
+    # 處理欄位名稱
+    for frame in [df, twii, sp]:
+        if isinstance(frame.columns, pd.MultiIndex):
+            frame.columns = [col[0] for col in frame.columns]
+
+    if not all(col in df.columns for col in ['High', 'Low', 'Close']):
+        st.error("下載的資料缺少 'High', 'Low', 或 'Close' 欄位。")
+        return None, None, None, df
+
+    close = df['Close']
+    df['TWII_Close'] = twii['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
+    df['SP500_Close'] = sp['Close'].reindex(df.index, method='ffill').fillna(method='bfill')
+
+    # 計算技術指標
+    df['MA5'] = close.rolling(5, min_periods=1).mean()
+    df['MA10'] = close.rolling(10, min_periods=1).mean()
+    df['MA20'] = close.rolling(20, min_periods=1).mean()
+    df['MA60'] = close.rolling(60, min_periods=1).mean()
+    df['MA_S'] = df['MA20']
+    df['MA_L'] = df['MA60']
+    df['MA_S_SLOPE'] = df['MA_S'] - df['MA_S'].shift(5)
+
+    df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
+    macd = ta.trend.MACD(close)
+    df['MACD'] = macd.macd_diff()
+    df['MACD_SIGNAL'] = macd.macd_signal()
+    bb_indicator = BollingerBands(close, window=20, window_dev=2)
+    df['BB_High'] = bb_indicator.bollinger_hband()
+    df['BB_Low'] = bb_indicator.bollinger_lband()
+    adx_indicator = ADXIndicator(df['High'], df['Low'], close, window=14)
+    df['ADX'] = adx_indicator.adx()
+    df['Prev_Close'] = close.shift(1)
+    for i in range(1, 4):
+        df[f'Prev_Close_Lag{i}'] = close.shift(i)
+    df['Volume_MA'] = df['Volume'].rolling(10, min_periods=1).mean() if 'Volume' in df.columns else 0
+    df['Volatility'] = close.rolling(10, min_periods=1).std()
+    
+    # 新增底部/頭部策略所需指標
+    df['K'], df['D'] = calc_kd(df, CFG.stoch_k, CFG.stoch_d, CFG.stoch_smooth)
+    df['ATR'] = calc_atr(df, CFG.atr_period)
+    df['RecentLow'] = df['Close'].rolling(CFG.bottom_lookback, min_periods=1).min()
+    df['PriorHigh'] = df['Close'].shift(1).rolling(CFG.higher_high_lookback, min_periods=1).max()
+    df['RecentHigh'] = df['Close'].rolling(CFG.top_lookback, min_periods=1).max()
+    df['PriorLow'] = df['Close'].shift(1).rolling(CFG.lower_low_lookback, min_periods=1).min()
+    df['VOL_MA'] = df['Volume'].rolling(CFG.volume_ma, min_periods=1).mean()
+
+    # 準備特徵
+    feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
+             'MACD_SIGNAL', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
+             'BB_Low', 'ADX'] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
+    
+    df_clean = df[feats + ['Close']].dropna()
+    
+    # 如果數據量不足，返回完整數據，讓後續的 "新上市" 策略處理
+    if len(df_clean) < 30:
+        return None, None, None, df
+
+    # 訓練模型
+    X = df_clean[feats].values
+    y = df_clean['Close'].values
+    X_mean = np.mean(X, axis=0)
+    X_std = np.std(X, axis=0)
+    X_std[X_std == 0] = 1
+    X_normalized = (X - X_mean) / X_std
+    weights = np.exp(-decay_factor * np.arange(len(X))[::-1])
+    weights = weights / np.sum(weights)
+    split_idx = int(len(X_normalized) * 0.8)
+    X_train, X_val, y_train, y_val, train_weights = X_normalized[:split_idx], X_normalized[split_idx:], y[:split_idx], y[split_idx:], weights[:split_idx]
+
+    models = []
+    model_params = [
+        {'n_estimators': 100, 'max_depth': 10, 'min_samples_split': 5, 'min_samples_leaf': 2, 'random_state': 42},
+        {'n_estimators': 80, 'max_depth': 8, 'min_samples_split': 3, 'min_samples_leaf': 1, 'random_state': 123},
+        {'n_estimators': 120, 'max_depth': 12, 'min_samples_split': 7, 'min_samples_leaf': 3, 'random_state': 456}
+    ]
+    for params in model_params:
+        model = RandomForestRegressor(**params, n_jobs=-1)
+        model.fit(X_train, y_train, sample_weight=train_weights)
+        models.append(model)
+
+    # 進行預測
+    last_features_normalized = X_normalized[-1:].copy()
+    last_close = float(y[-1])
+    predictions = {}
+    future_dates = pd.bdate_range(start=df_clean.index[-1], periods=6)[1:]
+    current_features_normalized = last_features_normalized.copy()
+    predicted_prices = [last_close]
+
+    for i, date in enumerate(future_dates):
+        day_predictions = [model.predict(current_features_normalized)[0] for model in models]
+        ensemble_pred = np.average(day_predictions, weights=[0.5, 0.3, 0.2])
         
-        df_clean = df[feats + ['Close']].dropna()
+        # 加入波動性調整
+        historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])
+        volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.05)
+        final_pred = ensemble_pred + volatility_adjustment
         
-        # 如果數據量不足，返回完整數據，讓後續的 "新上市" 策略處理
-        if len(df_clean) < 30:
-            return last, predictions, preds, df
+        # 限制價格範圍
+        max_deviation_pct = 0.10
+        upper_limit = last_close * (1 + max_deviation_pct)
+        lower_limit = last_close * (1 - max_deviation_pct)
+        final_pred = min(max(final_pred, lower_limit), upper_limit)
+        
+        predictions[date.date()] = float(final_pred)
+        predicted_prices.append(final_pred)
 
-        # 訓練模型
-        X = df_clean[feats].values
-        y = df_clean['Close'].values
-        X_mean = np.mean(X, axis=0)
-        X_std = np.std(X, axis=0)
-        X_std[X_std == 0] = 1
-        X_normalized = (X - X_mean) / X_std
-        weights = np.exp(-decay_factor * np.arange(len(X))[::-1])
-        weights = weights / np.sum(weights)
-        split_idx = int(len(X_normalized) * 0.8)
-        X_train, X_val, y_train, y_val, train_weights = X_normalized[:split_idx], X_normalized[split_idx:], y[:split_idx], y[split_idx:], weights[:split_idx]
-
-        models = []
-        model_params = [
-            {'n_estimators': 100, 'max_depth': 10, 'min_samples_split': 5, 'min_samples_leaf': 2, 'random_state': 42},
-            {'n_estimators': 80, 'max_depth': 8, 'min_samples_split': 3, 'min_samples_leaf': 1, 'random_state': 123},
-            {'n_estimators': 120, 'max_depth': 12, 'min_samples_split': 7, 'min_samples_leaf': 3, 'random_state': 456}
-        ]
-        for params in model_params:
-            model = RandomForestRegressor(**params, n_jobs=-1)
-            model.fit(X_train, y_train, sample_weight=train_weights)
-            models.append(model)
-
-        # 進行預測
-        last_features_normalized = X_normalized[-1:].copy()
-        last_close = float(y[-1])
-        predictions = {}
-        future_dates = pd.bdate_range(start=df_clean.index[-1], periods=6)[1:]
-        current_features_normalized = last_features_normalized.copy()
-        predicted_prices = [last_close]
-
-        for i, date in enumerate(future_dates):
-            day_predictions = [model.predict(current_features_normalized)[0] for model in models]
-            ensemble_pred = np.average(day_predictions, weights=[0.5, 0.3, 0.2])
-            
-            # 加入波動性調整
-            historical_volatility = np.std(y[-30:]) / np.mean(y[-30:])
-            volatility_adjustment = np.random.normal(0, ensemble_pred * historical_volatility * 0.05)
-            final_pred = ensemble_pred + volatility_adjustment
-            
-            # 限制價格範圍
-            max_deviation_pct = 0.10
-            upper_limit = last_close * (1 + max_deviation_pct)
-            lower_limit = last_close * (1 - max_deviation_pct)
-            final_pred = min(max(final_pred, lower_limit), upper_limit)
-            
-            predictions[date.date()] = float(final_pred)
-            predicted_prices.append(final_pred)
-
-            # 更新下一天的特徵 (迭代預測)
-            if i < len(future_dates) - 1:
-                new_features = current_features_normalized[0].copy()
-                # 遍歷所有需要更新的特徵
-                for feat_name in ['Prev_Close', 'MA5', 'MA10', 'Volatility'] + [f'Prev_Close_Lag{j}' for j in range(1, 4)]:
-                    if feat_name in feats:
-                        idx = feats.index(feat_name)
-                        if feat_name == 'Prev_Close':
-                            value = final_pred
-                        elif feat_name.startswith('Prev_Close_Lag'):
-                            lag = int(feat_name[-1])
-                            if len(predicted_prices) > lag:
-                                value = predicted_prices[-(lag + 1)]
-                            else: continue
-                        elif feat_name == 'MA5':
-                            value = np.mean(predicted_prices[-min(5, len(predicted_prices)):])
-                        elif feat_name == 'MA10':
-                            value = np.mean(predicted_prices[-min(10, len(predicted_prices)):])
-                        elif feat_name == 'Volatility':
+        # 更新下一天的特徵 (迭代預測)
+        if i < len(future_dates) - 1:
+            new_features = current_features_normalized[0].copy()
+            # 遍歷所有需要更新的特徵
+            for feat_name in ['Prev_Close', 'MA5', 'MA10', 'Volatility'] + [f'Prev_Close_Lag{j}' for j in range(1, 4)]:
+                if feat_name in feats:
+                    idx = feats.index(feat_name)
+                    if feat_name == 'Prev_Close':
+                        value = final_pred
+                    elif feat_name.startswith('Prev_Close_Lag'):
+                        lag = int(feat_name[-1])
+                        if len(predicted_prices) > lag:
+                            value = predicted_prices[-(lag + 1)]
+                        else: continue
+                    elif feat_name == 'MA5':
+                        value = np.mean(predicted_prices[-min(5, len(predicted_prices)):])
+                    elif feat_name == 'MA10':
+                        value = np.mean(predicted_prices[-min(10, len(predicted_prices)):])
+                    elif feat_name == 'Volatility':
                              if len(predicted_prices) >= 2:
                                  value = np.std(predicted_prices[-min(10, len(predicted_prices)):])
                              else: continue
-                        
-                        new_features[idx] = (value - X_mean[idx]) / X_std[idx]
-                current_features_normalized = new_features.reshape(1, -1)
-        
-        preds = {f'T+{i + 1}': p for i, p in enumerate(predictions.values())}
-
-        # 顯示模型驗證資訊
-        if len(X_val) > 0:
-            y_pred_val = models[0].predict(X_val)
-            rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
-            st.info(f"模型驗證 - RMSE: {rmse:.2f} (約 {rmse / last_close * 100:.1f}%)")
-            feature_importance = models[0].feature_importances_
-            top_features = sorted(zip(feats, feature_importance), key=lambda x: x[1], reverse=True)[:5]
-            st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
-
-        return last_close, predictions, preds, df
+                    
+                    new_features[idx] = (value - X_mean[idx]) / X_std[idx]
+            current_features_normalized = new_features.reshape(1, -1)
     
-    except Exception as e:
-        st.error(f"預測過程發生錯誤: {str(e)}")
-        return None, None, None, None
+    preds = {f'T+{i + 1}': p for i, p in enumerate(predictions.values())}
+
+    # 顯示模型驗證資訊
+    if len(X_val) > 0:
+        y_pred_val = models[0].predict(X_val)
+        rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
+        st.info(f"模型驗證 - RMSE: {rmse:.2f} (約 {rmse / last_close * 100:.1f}%)")
+        feature_importance = models[0].feature_importances_
+        top_features = sorted(zip(feats, feature_importance), key=lambda x: x[1], reverse=True)[:5]
+        st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
+
+    return last_close, predictions, preds, df
 
 
 def get_trade_advice(last, preds):
@@ -519,8 +509,9 @@ if st.button("🔮 開始分析", type="primary", use_container_width=True):
     with st.spinner("🚀 正在下載數據、訓練模型並進行分析..."):
         last, forecast, preds, df_with_indicators = predict_next_5(full_code, days, decay_factor)
         
-    if last is None:
-        st.error("❌ 分析失敗，請檢查上方錯誤訊息或網路連線")
+    if df_with_indicators.empty:
+        st.error(f"❌ 無法下載資料：{full_code}")
+        st.warning("請檢查股票代號是否正確，或此股票目前無資料。")
     else:
         # Check if there is enough data for the full analysis
         is_low_volume_stock = len(df_with_indicators) < 50
@@ -559,77 +550,4 @@ if st.button("🔮 開始分析", type="primary", use_container_width=True):
                     st.write(f"🔴 **潛在賣點**: {max_date} @ ${max_price:.2f}")
 
             with main_col2:
-                st.subheader("📅 未來 5 日預測")
-                if forecast and df_with_indicators is not None and not df_with_indicators.empty:
-                    forecast_df = pd.DataFrame(list(forecast.items()), columns=['日期', '預測股價'])
-                    forecast_df['漲跌'] = forecast_df['預測股價'] - last
-                    forecast_df['漲跌幅 (%)'] = (forecast_df['漲跌'] / last) * 100
-                    
-                    def color_change(val):
-                        color = 'red' if val > 0 else 'green' if val < 0 else 'gray'
-                        return f'color: {color}'
-                    
-                    st.dataframe(forecast_df.style.format({
-                        '預測股價': '${:,.2f}',
-                        '漲跌': '{:+.2f}',
-                        '漲跌幅 (%)': '{:+.2f}%'
-                    }).apply(lambda x: x.map(color_change), subset=['漲跌', '漲跌幅 (%)']), use_container_width=True)
-
-            st.subheader("📈 預測趨勢圖")
-            if forecast and df_with_indicators is not None and not df_with_indicators.empty:
-                chart_data = pd.DataFrame({
-                    '日期': [df_with_indicators.index[-1].date()] + list(forecast.keys()),
-                    '股價': [last] + list(forecast.values())
-                })
-                st.line_chart(chart_data.set_index('日期'))
-        else:
-            st.warning("⚠️ 數據量不足，無法執行 AI 預測模型。")
-
-        st.markdown("---")
-
-        # --- 技術分析訊號區塊 ---
-        st.subheader("🔍 技術分析訊號")
-        
-        # 執行買/賣點分析
-        if not is_low_volume_stock:
-            bottom_fishing_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="normal")
-            summary_col1, summary_col2 = st.columns([1, 2])
-            with summary_col1:
-                st.metric(f"是否符合{bottom_fishing_summary['動作']}訊號", "✅ 符合" if bottom_fishing_summary["是否符合訊號"] else "❌ 不符合")
-                st.write(f"**理由**: {bottom_fishing_summary['理由']}")
-            with summary_col2:
-                st.write(f"**{bottom_fishing_summary['風險']}**: ${bottom_fishing_summary['建議停損']:.2f} (ATR ≈ {bottom_fishing_summary['估計ATR']:.2f})")
-                st.write(f"**建議{bottom_fishing_summary['動作']}股數**: {bottom_fishing_summary['建議股數']:,} 股")
-        else:
-            # 執行新上市/低成交量股票的分析
-            low_volume_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="low_volume")
-            st.warning("ℹ️ 數據量不足，已切換至「新上市/低成交量」簡易分析模式。")
-            summary_col1, summary_col2 = st.columns([1, 2])
-            with summary_col1:
-                st.metric(f"是否符合{low_volume_summary['動作']}訊號", "✅ 符合" if low_volume_summary["是否符合訊號"] else "❌ 不符合")
-                st.write(f"**理由**: {low_volume_summary['理由']}")
-            with summary_col2:
-                st.write(f"**分析註記**: {low_volume_summary['風險']}")
-                st.write(f"**風險控管**：此模式未提供基於ATR的停損建議，請自行評估。")
-
-        st.markdown("---")
-
-        # --- 事後驗證區塊 ---
-        st.subheader(f"📜 簡易事後驗證 (近一年 - {strategy_type})")
-        
-        # 判斷是否顯示回測結果
-        if not is_low_volume_stock:
-            stat = simple_forward_test(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="normal")
-            if stat['樣本數'] > 0:
-                st.write(f"**分析天數**: {CFG.backtest_lookback_days} 日")
-                st.write(f"**訊號樣本數**: {stat['樣本數']}")
-                st.write(f"**勝率 (>0%)**: {stat['勝率(>0%)']}%")
-                st.write(f"**{CFG.fwd_days} 日最佳中位數報酬**: {stat[f'{CFG.fwd_days}日最佳中位數']}%")
-                st.write(f"**平均報酬**: {stat['平均']}%")
-            else:
-                st.warning("⚠️ 在指定的回看期間內未找到符合條件的訊號，無法進行回測。")
-        else:
-            st.warning("⚠️ 數據量不足，無法執行歷史回測。")
-
-st.markdown("---")
-st.caption("⚠️ 此程式碼僅供學術研究與參考，不構成任何投資建議。投資有風險，請謹慎決策。")
+                st.subheader("📅 未來 5 日預
