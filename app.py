@@ -50,14 +50,12 @@ def calculate_technical_indicators(df, twii_close):
     df['MACD'] = exp12 - exp26
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-    # --- 修正布林通道 (Bollinger Bands) 的計算方式 ---
-    # 為了確保計算的穩定性並避免錯誤，我們在這裡獨立計算布林通道需要的中軌與標準差
+    # 布林通道 (Bollinger Bands)
     bb_window = 20
     middle_band = df['Close'].rolling(window=bb_window).mean()
     std_dev = df['Close'].rolling(window=bb_window).std()
     df['BB_High'] = middle_band + (std_dev * 2)
     df['BB_Low'] = middle_band - (std_dev * 2)
-    # --- 修正結束 ---
     
     # ATR (Average True Range)
     df['TR'] = np.maximum.reduce([
@@ -91,6 +89,17 @@ def get_market_data(stock, start_date, end_date):
     df = yf.download(stock, start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
     twii = yf.download("^TWII", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
     sp = yf.download("^GSPC", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
+
+    # --- 修正開始 ---
+    # 處理 yfinance 可能回傳 MultiIndex 欄位的問題，將其 "壓平"
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+    if isinstance(twii.columns, pd.MultiIndex):
+        twii.columns = twii.columns.droplevel(1)
+    if isinstance(sp.columns, pd.MultiIndex):
+        sp.columns = sp.columns.droplevel(1)
+    # --- 修正結束 ---
+
     if df.empty or twii.empty or sp.empty:
         return None, None, None
     return df, twii, sp
@@ -160,7 +169,8 @@ def get_institutional_data(stock_code):
     """使用 FinMind API 抓取最新的三大法人與融資融券資料"""
     try:
         api = DataLoader()
-        api.login_by_token(api_token='YOUR_FINMIND_API_TOKEN') # 建議換成你自己的 FinMind Token
+        # 您可以在 FinMind 官網免費註冊取得 token，以獲得更高的 API 使用額度
+        # api.login_by_token(api_token='YOUR_FINMIND_API_TOKEN') 
         today_str = dt.datetime.now().strftime("%Y-%m-%d")
         start_str = (dt.datetime.now() - dt.timedelta(days=10)).strftime("%Y-%m-%d")
         stock_id = stock_code.replace(".TW", "")
@@ -263,7 +273,7 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
 
         latest_institutional, latest_margin = get_institutional_data(full_code)
 
-        if latest_institutional is not None:
+        if latest_ institutional is not None:
             data_date = latest_institutional['date']
             st.caption(f"資料日期：{data_date}")
 
