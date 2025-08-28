@@ -132,9 +132,75 @@ def generate_signal_row_sell(row_prior, row_now, cfg: Config):
     all_ok = top_built and kd_ok_sell and macd_hist_down and trend_ok_sell and volume_ok_sell
     return all_ok, reasons
 
+# ====== 訊號生成：新上市/低成交量股票策略 ======
+def generate_signal_low_volume(df: pd.DataFrame, strategy_type: str):
+    """
+    針對資料不足的股票，使用簡單的價量關係進行買/賣點判斷。
+    買進訊號：收盤價接近歷史新低 + 量能顯著放大
+    賣出訊號：收盤價接近歷史新高 + 量能顯著放大
+    """
+    reasons = []
+    
+    # 確保有足夠的數據進行基本計算
+    if len(df) < 5:
+        return False, ["資料量不足，無法判斷"]
+
+    row_now = df.iloc[-1]
+    last_volume = row_now['Volume']
+    # 計算近 5 日均量
+    vol_ma5 = df['Volume'].rolling(5, min_periods=1).mean().iloc[-1]
+    
+    # 買進策略
+    if strategy_type == "buy":
+        # 條件：收盤價接近歷史低點 (近 1.05 倍歷史低點)
+        is_near_low = row_now['Close'] <= df['Low'].min() * 1.05
+        # 條件：當日成交量顯著放大 (超過近 5 日均量 3 倍)
+        is_volume_spike = last_volume > vol_ma5 * 3
+        
+        if is_near_low:
+            reasons.append("接近歷史低點")
+        if is_volume_spike:
+            reasons.append("成交量顯著放大")
+            
+        all_ok = is_near_low and is_volume_spike
+        return all_ok, reasons
+
+    # 賣出策略
+    elif strategy_type == "sell":
+        # 條件：收盤價接近歷史高點 (近 0.95 倍歷史高點)
+        is_near_high = row_now['Close'] >= df['High'].max() * 0.95
+        # 條件：當日成交量顯著放大 (超過近 5 日均量 3 倍)
+        is_volume_spike = last_volume > vol_ma5 * 3
+        
+        if is_near_high:
+            reasons.append("接近歷史高點")
+        if is_volume_spike:
+            reasons.append("成交量顯著放大")
+        
+        all_ok = is_near_high and is_volume_spike
+        return all_ok, reasons
+        
+    return False, ["策略模式錯誤"]
+
 # ====== 評估最新資料點 ======
-def evaluate_latest(df: pd.DataFrame, cfg: Config, strategy_type: str):
+def evaluate_latest(df: pd.DataFrame, cfg: Config, strategy_type: str, analysis_mode: str):
     """評估最新資料點是否符合訊號，並給出風險控管建議"""
+    if analysis_mode == "low_volume":
+        signal, reasons = generate_signal_low_volume(df, strategy_type)
+        summary = {
+            "日期": df.index[-1].strftime("%Y-%m-%d"),
+            "收盤": round(df.iloc[-1]['Close'], 2),
+            "是否符合訊號": signal,
+            "理由": "、".join(reasons) if reasons else "條件不足",
+            "動作": "買進" if strategy_type == "buy" else "放空",
+            "風險": "無（資料不足）",
+            "建議停損": "無（資料不足）",
+            "估計ATR": "無（資料不足）",
+            "建議股數": "無（資料不足）"
+        }
+        return summary, df
+
+    # 原始策略需要足夠資料
     if len(df) < max(cfg.ma_long, cfg.bottom_lookback, cfg.top_lookback, cfg.atr_period) + 5:
         return {"是否符合訊號": False, "理由": "資料樣本太短，無法可靠判斷。"}, None
 
@@ -180,8 +246,12 @@ def evaluate_latest(df: pd.DataFrame, cfg: Config, strategy_type: str):
     return summary, df
 
 # ====== 簡易事後驗證 ======
-def simple_forward_test(df: pd.DataFrame, cfg: Config, strategy_type: str):
+def simple_forward_test(df: pd.DataFrame, cfg: Config, strategy_type: str, analysis_mode: str):
     """簡易事後驗證：訊號後觀察最佳報酬"""
+    # 新上市/低成交量模式沒有回測數據
+    if analysis_mode == "low_volume":
+        return {"樣本數": 0, "勝率(>0%)": None, f"{cfg.fwd_days}日最佳中位數": None, "平均": None}
+
     df = df.copy()
     results = []
     
@@ -251,10 +321,6 @@ def predict_next_5(stock, days, decay_factor):
             st.error(f"無法下載資料：{stock}")
             return None, None, None, None
 
-        if df is None or len(df) < 50:
-            st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據")
-            return None, None, None, None
-
         # 處理欄位名稱
         for frame in [df, twii, sp]:
             if isinstance(frame.columns, pd.MultiIndex):
@@ -297,8 +363,8 @@ def predict_next_5(stock, days, decay_factor):
         df['ATR'] = calc_atr(df, CFG.atr_period)
         df['RecentLow'] = df['Close'].rolling(CFG.bottom_lookback, min_periods=1).min()
         df['PriorHigh'] = df['Close'].shift(1).rolling(CFG.higher_high_lookback, min_periods=1).max()
-        df['RecentHigh'] = df['Close'].rolling(CFG.top_lookback, min_periods=1).max() # 新增
-        df['PriorLow'] = df['Close'].shift(1).rolling(CFG.lower_low_lookback, min_periods=1).min() # 新增
+        df['RecentHigh'] = df['Close'].rolling(CFG.top_lookback, min_periods=1).max()
+        df['PriorLow'] = df['Close'].shift(1).rolling(CFG.lower_low_lookback, min_periods=1).min()
         df['VOL_MA'] = df['Volume'].rolling(CFG.volume_ma, min_periods=1).mean()
 
         # 準備特徵
@@ -307,9 +373,10 @@ def predict_next_5(stock, days, decay_factor):
                  'BB_Low', 'ADX'] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
         df_clean = df[feats + ['Close']].dropna()
+        
+        # 如果數據量不足，返回完整數據，讓後續的 "新上市" 策略處理
         if len(df_clean) < 30:
-            st.error(f"清理後資料不足，僅有 {len(df_clean)} 行數據")
-            return None, None, None, None
+            return last, predictions, preds, df
 
         # 訓練模型
         X = df_clean[feats].values
@@ -455,6 +522,9 @@ if st.button("🔮 開始分析", type="primary", use_container_width=True):
     if last is None:
         st.error("❌ 分析失敗，請檢查上方錯誤訊息或網路連線")
     else:
+        # Check if there is enough data for the full analysis
+        is_low_volume_stock = len(df_with_indicators) < 50
+        
         st.success("✅ 分析完成！")
         try:
             ticker_info = yf.Ticker(full_code).info
@@ -468,81 +538,98 @@ if st.button("🔮 開始分析", type="primary", use_container_width=True):
         # --- AI 預測結果區塊 ---
         st.subheader("🤖 AI 智慧預測")
         main_col1, main_col2 = st.columns([1, 2])
-        with main_col1:
-            st.metric("最新收盤價", f"${last:.2f}")
-            advice = get_trade_advice(last, preds)
-            if "看漲" in advice:
-                st.success(f"📈 **交易建議**: {advice}")
-            elif "看跌" in advice:
-                st.error(f"📉 **交易建議**: {advice}")
-            else:
-                st.warning(f"📊 **交易建議**: {advice}")
+        if not is_low_volume_stock:
+            with main_col1:
+                st.metric("最新收盤價", f"${last:.2f}")
+                advice = get_trade_advice(last, preds)
+                if "看漲" in advice:
+                    st.success(f"📈 **交易建議**: {advice}")
+                elif "看跌" in advice:
+                    st.error(f"📉 **交易建議**: {advice}")
+                else:
+                    st.warning(f"📊 **交易建議**: {advice}")
 
-            st.markdown("### 📌 預測期間最佳買賣點")
-            if forecast:
-                min_date = min(forecast, key=forecast.get)
-                min_price = forecast[min_date]
-                max_date = max(forecast, key=forecast.get)
-                max_price = forecast[max_date]
-                st.write(f"🟢 **潛在買點**: {min_date} @ ${min_price:.2f}")
-                st.write(f"🔴 **潛在賣點**: {max_date} @ ${max_price:.2f}")
+                st.markdown("### 📌 預測期間最佳買賣點")
+                if forecast:
+                    min_date = min(forecast, key=forecast.get)
+                    min_price = forecast[min_date]
+                    max_date = max(forecast, key=forecast.get)
+                    max_price = forecast[max_date]
+                    st.write(f"🟢 **潛在買點**: {min_date} @ ${min_price:.2f}")
+                    st.write(f"🔴 **潛在賣點**: {max_date} @ ${max_price:.2f}")
 
-        with main_col2:
-            st.subheader("📅 未來 5 日預測")
+            with main_col2:
+                st.subheader("📅 未來 5 日預測")
+                if forecast and df_with_indicators is not None and not df_with_indicators.empty:
+                    forecast_df = pd.DataFrame(list(forecast.items()), columns=['日期', '預測股價'])
+                    forecast_df['漲跌'] = forecast_df['預測股價'] - last
+                    forecast_df['漲跌幅 (%)'] = (forecast_df['漲跌'] / last) * 100
+                    
+                    def color_change(val):
+                        color = 'red' if val > 0 else 'green' if val < 0 else 'gray'
+                        return f'color: {color}'
+                    
+                    st.dataframe(forecast_df.style.format({
+                        '預測股價': '${:,.2f}',
+                        '漲跌': '{:+.2f}',
+                        '漲跌幅 (%)': '{:+.2f}%'
+                    }).apply(lambda x: x.map(color_change), subset=['漲跌', '漲跌幅 (%)']), use_container_width=True)
+
+            st.subheader("📈 預測趨勢圖")
             if forecast and df_with_indicators is not None and not df_with_indicators.empty:
-                forecast_df = pd.DataFrame(list(forecast.items()), columns=['日期', '預測股價'])
-                forecast_df['漲跌'] = forecast_df['預測股價'] - last
-                forecast_df['漲跌幅 (%)'] = (forecast_df['漲跌'] / last) * 100
-                
-                def color_change(val):
-                    color = 'red' if val > 0 else 'green' if val < 0 else 'gray'
-                    return f'color: {color}'
-                
-                st.dataframe(forecast_df.style.format({
-                    '預測股價': '${:,.2f}',
-                    '漲跌': '{:+.2f}',
-                    '漲跌幅 (%)': '{:+.2f}%'
-                }).apply(lambda x: x.map(color_change), subset=['漲跌', '漲跌幅 (%)']), use_container_width=True)
-
-        st.subheader("📈 預測趨勢圖")
-        if forecast and df_with_indicators is not None and not df_with_indicators.empty:
-            chart_data = pd.DataFrame({
-                '日期': [df_with_indicators.index[-1].date()] + list(forecast.keys()),
-                '股價': [last] + list(forecast.values())
-            })
-            st.line_chart(chart_data.set_index('日期'))
+                chart_data = pd.DataFrame({
+                    '日期': [df_with_indicators.index[-1].date()] + list(forecast.keys()),
+                    '股價': [last] + list(forecast.values())
+                })
+                st.line_chart(chart_data.set_index('日期'))
+        else:
+            st.warning("⚠️ 數據量不足，無法執行 AI 預測模型。")
 
         st.markdown("---")
 
-        # --- 買/賣點分析區塊 ---
+        # --- 技術分析訊號區塊 ---
         st.subheader("🔍 技術分析訊號")
         
         # 執行買/賣點分析
-        bottom_fishing_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell")
+        if not is_low_volume_stock:
+            bottom_fishing_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="normal")
+            summary_col1, summary_col2 = st.columns([1, 2])
+            with summary_col1:
+                st.metric(f"是否符合{bottom_fishing_summary['動作']}訊號", "✅ 符合" if bottom_fishing_summary["是否符合訊號"] else "❌ 不符合")
+                st.write(f"**理由**: {bottom_fishing_summary['理由']}")
+            with summary_col2:
+                st.write(f"**{bottom_fishing_summary['風險']}**: ${bottom_fishing_summary['建議停損']:.2f} (ATR ≈ {bottom_fishing_summary['估計ATR']:.2f})")
+                st.write(f"**建議{bottom_fishing_summary['動作']}股數**: {bottom_fishing_summary['建議股數']:,} 股")
+        else:
+            # 執行新上市/低成交量股票的分析
+            low_volume_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="low_volume")
+            st.warning("ℹ️ 數據量不足，已切換至「新上市/低成交量」簡易分析模式。")
+            summary_col1, summary_col2 = st.columns([1, 2])
+            with summary_col1:
+                st.metric(f"是否符合{low_volume_summary['動作']}訊號", "✅ 符合" if low_volume_summary["是否符合訊號"] else "❌ 不符合")
+                st.write(f"**理由**: {low_volume_summary['理由']}")
+            with summary_col2:
+                st.write(f"**分析註記**: {low_volume_summary['風險']}")
+                st.write(f"**風險控管**：此模式未提供基於ATR的停損建議，請自行評估。")
 
-        summary_col1, summary_col2 = st.columns([1, 2])
-        with summary_col1:
-            st.metric(f"是否符合{bottom_fishing_summary['動作']}訊號", "✅ 符合" if bottom_fishing_summary["是否符合訊號"] else "❌ 不符合")
-            st.write(f"**理由**: {bottom_fishing_summary['理由']}")
-
-        with summary_col2:
-            st.write(f"**{bottom_fishing_summary['風險']}**: ${bottom_fishing_summary['建議停損']:.2f} (ATR ≈ {bottom_fishing_summary['估計ATR']:.2f})")
-            st.write(f"**建議{bottom_fishing_summary['動作']}股數**: {bottom_fishing_summary['建議股數']:,} 股")
-        
         st.markdown("---")
 
         # --- 事後驗證區塊 ---
         st.subheader(f"📜 簡易事後驗證 (近一年 - {strategy_type})")
-        stat = simple_forward_test(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell")
-
-        if stat['樣本數'] > 0:
-            st.write(f"**分析天數**: {CFG.backtest_lookback_days} 日")
-            st.write(f"**訊號樣本數**: {stat['樣本數']}")
-            st.write(f"**勝率 (>0%)**: {stat['勝率(>0%)']}%")
-            st.write(f"**{CFG.fwd_days} 日最佳中位數報酬**: {stat[f'{CFG.fwd_days}日最佳中位數']}%")
-            st.write(f"**平均報酬**: {stat['平均']}%")
+        
+        # 判斷是否顯示回測結果
+        if not is_low_volume_stock:
+            stat = simple_forward_test(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="normal")
+            if stat['樣本數'] > 0:
+                st.write(f"**分析天數**: {CFG.backtest_lookback_days} 日")
+                st.write(f"**訊號樣本數**: {stat['樣本數']}")
+                st.write(f"**勝率 (>0%)**: {stat['勝率(>0%)']}%")
+                st.write(f"**{CFG.fwd_days} 日最佳中位數報酬**: {stat[f'{CFG.fwd_days}日最佳中位數']}%")
+                st.write(f"**平均報酬**: {stat['平均']}%")
+            else:
+                st.warning("⚠️ 在指定的回看期間內未找到符合條件的訊號，無法進行回測。")
         else:
-            st.warning("⚠️ 在指定的回看期間內未找到符合條件的訊號，無法進行回測。")
+            st.warning("⚠️ 數據量不足，無法執行歷史回測。")
 
 st.markdown("---")
 st.caption("⚠️ 此程式碼僅供學術研究與參考，不構成任何投資建議。投資有風險，請謹慎決策。")
