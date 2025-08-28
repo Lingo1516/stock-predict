@@ -50,9 +50,14 @@ def calculate_technical_indicators(df, twii_close):
     df['MACD'] = exp12 - exp26
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-    # Bollinger Bands
-    df['BB_High'] = df['MA20'] + df['Close'].rolling(window=20).std() * 2
-    df['BB_Low'] = df['MA20'] - df['Close'].rolling(window=20).std() * 2
+    # --- 修正布林通道 (Bollinger Bands) 的計算方式 ---
+    # 為了確保計算的穩定性並避免錯誤，我們在這裡獨立計算布林通道需要的中軌與標準差
+    bb_window = 20
+    middle_band = df['Close'].rolling(window=bb_window).mean()
+    std_dev = df['Close'].rolling(window=bb_window).std()
+    df['BB_High'] = middle_band + (std_dev * 2)
+    df['BB_Low'] = middle_band - (std_dev * 2)
+    # --- 修正結束 ---
     
     # ATR (Average True Range)
     df['TR'] = np.maximum.reduce([
@@ -155,6 +160,7 @@ def get_institutional_data(stock_code):
     """使用 FinMind API 抓取最新的三大法人與融資融券資料"""
     try:
         api = DataLoader()
+        api.login_by_token(api_token='YOUR_FINMIND_API_TOKEN') # 建議換成你自己的 FinMind Token
         today_str = dt.datetime.now().strftime("%Y-%m-%d")
         start_str = (dt.datetime.now() - dt.timedelta(days=10)).strftime("%Y-%m-%d")
         stock_id = stock_code.replace(".TW", "")
@@ -173,7 +179,7 @@ def get_institutional_data(stock_code):
         
         return latest_institutional, latest_margin
     except Exception as e:
-        print(f"抓取籌碼資料時發生錯誤: {e}")
+        st.warning(f"抓取籌碼資料時發生錯誤: {e}。可能是API請求次數達到上限。")
         return None, None
 
 # --------------------------------------------------------------------------
@@ -242,13 +248,14 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
             if forecast:
                 # 取得最新收盤價的日期
                 df_for_date, _, _ = get_market_data(full_code, dt.date.today() - dt.timedelta(days=10), dt.date.today() + dt.timedelta(days=1))
-                latest_date = pd.to_datetime(df_for_date.index[-1].date())
+                if df_for_date is not None and not df_for_date.empty:
+                    latest_date = pd.to_datetime(df_for_date.index[-1].date())
 
-                chart_data = pd.DataFrame({
-                    '日期': [latest_date] + [pd.to_datetime(d) for d in forecast.keys()],
-                    '股價': [last_close] + list(forecast.values())
-                })
-                st.line_chart(chart_data.set_index('日期'))
+                    chart_data = pd.DataFrame({
+                        '日期': [latest_date] + [pd.to_datetime(d) for d in forecast.keys()],
+                        '股價': [last_close] + list(forecast.values())
+                    })
+                    st.line_chart(chart_data.set_index('日期'))
         
         # --- 新增的籌碼資訊顯示區塊 ---
         st.markdown("---")
