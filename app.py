@@ -9,6 +9,154 @@ from datetime import datetime
 import time
 from ta.volatility import BollingerBands
 from ta.trend import ADXIndicator
+from ta.momentum import StochRSIIndicator, StochasticOscillator
+from dataclasses import dataclass
+
+# 設定忽略警告，避免不必要的輸出
+import warnings
+warnings.filterwarnings("ignore")
+
+# ====== 參數設定 (整合自第一個程式碼) ======
+@dataclass
+class Config:
+    symbol: str = "2330.TW"
+    start: str = "2025-01-01"
+    end: str = "2025-08-28"
+    # 底部判定
+    bottom_lookback: int = 20           # 近期低點回看天數
+    higher_high_lookback: int = 5       # 近期前高回看天數
+    # KD
+    stoch_k: int = 9
+    stoch_d: int = 3
+    stoch_smooth: int = 3
+    kd_threshold: float = 20.0
+    # MACD
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    # 趨勢/量能濾網
+    ma_short: int = 20
+    ma_long: int = 60
+    volume_ma: int = 20
+    # 風險控管
+    atr_period: int = 14
+    risk_per_trade: float = 0.01        # 每筆風險 1% 資金
+    capital: float = 1_000_000         # 假設資金
+    # 事後驗證
+    fwd_days: int = 5                  # 訊號後觀察天數
+    backtest_lookback_days: int = 252  # 回看一年做驗證
+
+CFG = Config()
+
+# ====== 技術指標計算工具 (整合並統一使用 TA-Lib) ======
+# 使用 ta 套件來計算 KD 指標
+def calc_kd(df: pd.DataFrame, k=9, d=3, smooth=3):
+    # KD 計算
+    stoch = StochasticOscillator(high=df['High'], low=df['Low'], close=df['Close'], window=k, smooth_window=smooth)
+    df['K'] = stoch.stoch()
+    df['D'] = stoch.stoch_signal()
+    return df['K'], df['D']
+
+# 使用 ta 套件來計算 ATR 指標
+def calc_atr(df: pd.DataFrame, period=14):
+    atr_indicator = ta.volatility.AverageTrueRange(df['High'], df['Low'], df['Close'], window=period)
+    return atr_indicator.average_true_range()
+
+# ====== 訊號生成 (來自第一個程式碼) ======
+def generate_signal_row(row_prior, row_now, cfg: Config):
+    """根據單日資料與配置生成買點訊號"""
+    reasons = []
+
+    # 1) 底部條件：收盤接近近期低點後回升，並有突破近期前高的跡象
+    bottom_built = (row_now['Close'] <= row_now['RecentLow'] * 1.08) and (row_now['Close'] > (row_now['PriorHigh'] * 0.8))
+    if bottom_built:
+        reasons.append("接近近期低點後回升")
+
+    # 2) KD 黃金交叉且脫離超賣區
+    kd_cross_up = (row_prior['K'] < row_prior['D']) and (row_now['K'] > row_now['D'])
+    kd_above_threshold = row_now['K'] > cfg.kd_threshold
+    kd_ok = kd_cross_up and kd_above_threshold
+    if kd_ok:
+        reasons.append(f"KD黃金交叉且K>{cfg.kd_threshold:.0f}")
+
+    # 3) MACD 柱轉正且放大
+    macd_hist_up = (row_now['MACD'] > 0) and (row_now['MACD'] > row_prior['MACD'])
+    if macd_hist_up:
+        reasons.append("MACD柱轉正且走揚")
+
+    # 4) 趨勢濾網：短均線在長均線上方、且短均線斜率為正
+    trend_ok = (row_now['MA_S'] > row_now['MA_L']) and (row_now['MA_S_SLOPE'] > 0)
+    if trend_ok:
+        reasons.append("多頭趨勢濾網通過")
+
+    # 5) 量能濾網：當日量 >= 近N日均量
+    volume_ok = row_now['Volume'] >= row_now['VOL_MA']
+    if volume_ok:
+        reasons.append("量能不弱於均量")
+
+    all_ok = bottom_built and kd_ok and macd_hist_up and trend_ok and volume_ok
+    return all_ok, reasons
+
+def evaluate_latest(df: pd.DataFrame, cfg: Config):
+    """評估最新資料點是否符合買點訊號，並給出風險控管建議"""
+    if len(df) < max(cfg.ma_long, cfg.bottom_lookback, cfg.atr_period) + 5:
+        return {"是否符合買點": False, "理由": "資料樣本太短，無法可靠判斷。"}, None
+
+    df = df.dropna().copy()
+    if len(df) < 2:
+        return {"是否符合買點": False, "理由": "有效樣本不足以產生訊號。"}, None
+
+    row_now = df.iloc[-1]
+    row_prior = df.iloc[-2]
+    signal, reasons = generate_signal_row(row_prior, row_now, cfg)
+
+    # 風險控管建議（以 ATR 設定停損）
+    atr = row_now['ATR']
+    stop_loss = row_now['Close'] - 2.5 * atr
+    position_risk = row_now['Close'] - stop_loss
+    position_size = 0
+    if position_risk > 0:
+        position_size = int((cfg.capital * cfg.risk_per_trade) // position_risk)
+
+    summary = {
+        "日期": df.index[-1].strftime("%Y-%m-%d"),
+        "收盤": round(row_now['Close'], 2),
+        "是否符合買點": signal,
+        "理由": "、".join(reasons) if reasons else "條件不足",
+        "建議停損": round(stop_loss, 2),
+        "估計ATR": round(float(atr), 2),
+        "建議張數(股數)": position_size
+    }
+    return summary, df
+
+def simple_forward_test(df: pd.DataFrame, cfg: Config):
+    """簡易事後驗證：訊號當天收盤買進，觀察未來 N 天最高收盤的相對報酬"""
+    df = df.copy()
+    results = []
+    
+    start_idx = max(cfg.ma_long, cfg.bottom_lookback, cfg.atr_period) + 2
+    
+    for i in range(start_idx, len(df) - cfg.fwd_days):
+        row_prior, row_now = df.iloc[i-1], df.iloc[i]
+        ok, _ = generate_signal_row(row_prior, row_now, cfg)
+        if ok:
+            entry = row_now['Close']
+            fwd_window = df['Close'].iloc[i+1:i+1+cfg.fwd_days]
+            if not fwd_window.empty:
+                best = fwd_window.max()
+                ret = (best / entry) - 1.0
+                results.append(ret)
+    
+    if not results:
+        return {"樣本數": 0, "勝率(>0%)": None, f"{cfg.fwd_days}日最佳中位數": None, "平均": None}
+
+    arr = np.array(results)
+    return {
+        "樣本數": int(arr.size),
+        "勝率(>0%)": round(float((arr > 0).mean()) * 100, 1),
+        f"{cfg.fwd_days}日最佳中位數": round(float(np.median(arr)) * 100, 2),
+        "平均": round(float(arr.mean()) * 100, 2)
+    }
 
 # 股票代號到中文名稱簡易對照字典
 stock_name_dict = {
@@ -37,9 +185,9 @@ def predict_next_5(stock, days, decay_factor):
                 st.warning(f"嘗試 {attempt + 1}/{max_retries} 下載失敗: {e}")
                 time.sleep(2)
 
-            if attempt == max_retries - 1 and (df is None or df.empty):
-                st.error(f"無法下載資料：{stock}")
-                return None, None, None, None
+        if attempt == max_retries - 1 and (df is None or df.empty):
+            st.error(f"無法下載資料：{stock}")
+            return None, None, None, None
 
         if df is None or len(df) < 50:
             st.error(f"資料不足，僅有 {len(df) if df is not None else 0} 行數據")
@@ -62,10 +210,15 @@ def predict_next_5(stock, days, decay_factor):
         df['MA5'] = close.rolling(5, min_periods=1).mean()
         df['MA10'] = close.rolling(10, min_periods=1).mean()
         df['MA20'] = close.rolling(20, min_periods=1).mean()
+        df['MA60'] = close.rolling(60, min_periods=1).mean()  # 新增 MA60 以符合底部策略
+        df['MA_S'] = df['MA20']
+        df['MA_L'] = df['MA60']
+        df['MA_S_SLOPE'] = df['MA_S'] - df['MA_S'].shift(5) # 簡單斜率
+
         df['RSI'] = ta.momentum.RSIIndicator(close, n=14).rsi()
         macd = ta.trend.MACD(close)
-        df['MACD'] = macd.macd()
-        df['MACD_Signal'] = macd.macd_signal()
+        df['MACD'] = macd.macd_diff() # 使用 MACD 柱狀圖來判斷
+        df['MACD_SIGNAL'] = macd.macd_signal()
         bb_indicator = BollingerBands(close, n=20, ndev=2)
         df['BB_High'] = bb_indicator.bollinger_hband()
         df['BB_Low'] = bb_indicator.bollinger_lband()
@@ -76,10 +229,17 @@ def predict_next_5(stock, days, decay_factor):
             df[f'Prev_Close_Lag{i}'] = close.shift(i)
         df['Volume_MA'] = df['Volume'].rolling(10, min_periods=1).mean() if 'Volume' in df.columns else 0
         df['Volatility'] = close.rolling(10, min_periods=1).std()
+        
+        # 新增底部策略所需指標
+        df['K'], df['D'] = calc_kd(df, CFG.stoch_k, CFG.stoch_d, CFG.stoch_smooth)
+        df['ATR'] = calc_atr(df, CFG.atr_period)
+        df['RecentLow'] = df['Close'].rolling(CFG.bottom_lookback, min_periods=1).min()
+        df['PriorHigh'] = df['Close'].shift(1).rolling(CFG.higher_high_lookback, min_periods=1).max()
+        df['VOL_MA'] = df['Volume'].rolling(CFG.volume_ma, min_periods=1).mean()
 
         # 準備特徵
         feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'Volume_MA', 'RSI', 'MACD',
-                 'MACD_Signal', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
+                 'MACD_SIGNAL', 'TWII_Close', 'SP500_Close', 'Volatility', 'BB_High',
                  'BB_Low', 'ADX'] + [f'Prev_Close_Lag{i}' for i in range(1, 4)]
         
         df_clean = df[feats + ['Close']].dropna()
@@ -156,7 +316,7 @@ def predict_next_5(stock, days, decay_factor):
                             value = np.mean(predicted_prices[-min(10, len(predicted_prices)):])
                         elif feat_name == 'Volatility':
                              if len(predicted_prices) >= 2:
-                                value = np.std(predicted_prices[-min(10, len(predicted_prices)):])
+                                 value = np.std(predicted_prices[-min(10, len(predicted_prices)):])
                              else: continue
                         
                         new_features[idx] = (value - X_mean[idx]) / X_std[idx]
@@ -173,15 +333,11 @@ def predict_next_5(stock, days, decay_factor):
             top_features = sorted(zip(feats, feature_importance), key=lambda x: x[1], reverse=True)[:5]
             st.info(f"重要特徵: {', '.join([f'{feat}({imp:.3f})' for feat, imp in top_features])}")
 
-        # --- 修正開始：增加回傳 df_clean ---
-        return last_close, predictions, preds, df_clean
-        # --- 修正結束 ---
-
+        return last_close, predictions, preds, df
+    
     except Exception as e:
         st.error(f"預測過程發生錯誤: {str(e)}")
-        # --- 修正開始：確保在錯誤時也回傳四個值 ---
         return None, None, None, None
-        # --- 修正結束 ---
 
 
 def get_trade_advice(last, preds):
@@ -202,8 +358,8 @@ def get_trade_advice(last, preds):
         return f"盤整 (預期變動 {change_percent:.1f}%)"
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="AI 股價預測系統", layout="wide")
-st.title("📈 AI 智慧股價預測系統")
+st.set_page_config(page_title="AI 智慧股價預測與底部買點分析", layout="wide")
+st.title("📈 AI 智慧股價預測與底部買點分析")
 st.markdown("---")
 
 col1, col2 = st.columns([2, 1])
@@ -220,21 +376,19 @@ mode_info = {
 st.info(f"**{mode}**: {mode_info[mode][0]}")
 days, decay_factor = mode_info[mode][1], mode_info[mode][2]
 
-if st.button("🔮 開始預測", type="primary", use_container_width=True):
+if st.button("🔮 開始分析", type="primary", use_container_width=True):
     full_code = code.strip()
     if not full_code.upper().endswith(".TW"):
         full_code = f"{full_code}.TW"
         
-    with st.spinner("🚀 正在下載數據、訓練模型並進行預測..."):
-        # --- 修正開始：接收第四個回傳值 df_clean ---
-        last, forecast, preds, df_clean = predict_next_5(full_code, days, decay_factor)
-        # --- 修正結束 ---
-
+    with st.spinner("🚀 正在下載數據、訓練模型並進行分析..."):
+        # 運行 AI 預測模型
+        last, forecast, preds, df_with_indicators = predict_next_5(full_code, days, decay_factor)
+        
     if last is None:
-        st.error("❌ 預測失敗，請檢查上方錯誤訊息或網路連線")
+        st.error("❌ 分析失敗，請檢查上方錯誤訊息或網路連線")
     else:
-        st.success("✅ 預測完成！")
-
+        st.success("✅ 分析完成！")
         try:
             ticker_info = yf.Ticker(full_code).info
             company_name = ticker_info.get('shortName') or ticker_info.get('longName') or "無法取得名稱"
@@ -242,8 +396,10 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
             company_name = "無法取得名稱"
 
         ch_name = stock_name_dict.get(full_code, "無中文名稱")
-        st.header(f"{ch_name} ({company_name}) - {full_code}")
+        st.header(f"股票分析報告：{ch_name} ({company_name}) - {full_code}")
 
+        # --- AI 預測結果區塊 ---
+        st.subheader("🤖 AI 智慧預測")
         main_col1, main_col2 = st.columns([1, 2])
         with main_col1:
             st.metric("最新收盤價", f"${last:.2f}")
@@ -266,7 +422,7 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
 
         with main_col2:
             st.subheader("📅 未來 5 日預測")
-            if forecast:
+            if forecast and df_with_indicators is not None and not df_with_indicators.empty:
                 forecast_df = pd.DataFrame(list(forecast.items()), columns=['日期', '預測股價'])
                 forecast_df['漲跌'] = forecast_df['預測股價'] - last
                 forecast_df['漲跌幅 (%)'] = (forecast_df['漲跌'] / last) * 100
@@ -282,14 +438,44 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
                 }).apply(lambda x: x.map(color_change), subset=['漲跌', '漲跌幅 (%)']), use_container_width=True)
 
         st.subheader("📈 預測趨勢圖")
-        if forecast and df_clean is not None and not df_clean.empty:
-            # --- 修正開始：使用傳回來的 df_clean ---
+        if forecast and df_with_indicators is not None and not df_with_indicators.empty:
             chart_data = pd.DataFrame({
-                '日期': [df_clean.index[-1].date()] + list(forecast.keys()),
+                '日期': [df_with_indicators.index[-1].date()] + list(forecast.keys()),
                 '股價': [last] + list(forecast.values())
             })
             st.line_chart(chart_data.set_index('日期'))
-            # --- 修正結束 ---
+
+        st.markdown("---")
+
+        # --- 底部買點分析區塊 ---
+        st.subheader("🔍 底部買點分析")
+        
+        # 執行底部買點分析
+        bottom_fishing_summary, _ = evaluate_latest(df_with_indicators, CFG)
+
+        summary_col1, summary_col2 = st.columns([1, 2])
+        with summary_col1:
+            st.metric("是否符合買點", "✅ 符合" if bottom_fishing_summary["是否符合買點"] else "❌ 不符合")
+            st.write(f"**理由**: {bottom_fishing_summary['理由']}")
+
+        with summary_col2:
+            st.write(f"**建議停損**: ${bottom_fishing_summary['建議停損']:.2f} (ATR ≈ {bottom_fishing_summary['估計ATR']:.2f})")
+            st.write(f"**建議股數**: {bottom_fishing_summary['建議張數(股數)']:,} 股")
+        
+        st.markdown("---")
+
+        # --- 事後驗證區塊 ---
+        st.subheader("📜 簡易事後驗證 (近一年)")
+        stat = simple_forward_test(df_with_indicators, CFG)
+
+        if stat['樣本數'] > 0:
+            st.write(f"**分析天數**: {CFG.backtest_lookback_days} 日")
+            st.write(f"**訊號樣本數**: {stat['樣本數']}")
+            st.write(f"**勝率 (>0%)**: {stat['勝率(>0%)']}%")
+            st.write(f"**{CFG.fwd_days} 日最佳中位數報酬**: {stat[f'{CFG.fwd_days}日最佳中位數']}%")
+            st.write(f"**平均報酬**: {stat['平均']}%")
+        else:
+            st.warning("⚠️ 在指定的回看期間內未找到符合條件的訊號，無法進行回測。")
 
 st.markdown("---")
-st.caption("⚠️ 此預測基於歷史數據與 AI 模型，僅供學術研究與參考，不構成任何投資建議。投資有風險，請謹慎決策。")
+st.caption("⚠️ 此程式碼僅供學術研究與參考，不構成任何投資建議。投資有風險，請謹慎決策。")
