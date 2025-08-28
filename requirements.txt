@@ -3,5 +3,5 @@ yfinance
 pandas
 numpy
 scikit-learn
-FinMind
-tqdm
+ta
+```ta` 是關鍵的函式庫，它包含了 `StochRSIIndicator` 和 `StochasticOscillator`。
