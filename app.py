@@ -90,7 +90,6 @@ def get_market_data(stock, start_date, end_date):
     twii = yf.download("^TWII", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
     sp = yf.download("^GSPC", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
 
-    # --- 修正開始 ---
     # 處理 yfinance 可能回傳 MultiIndex 欄位的問題，將其 "壓平"
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.droplevel(1)
@@ -98,7 +97,6 @@ def get_market_data(stock, start_date, end_date):
         twii.columns = twii.columns.droplevel(1)
     if isinstance(sp.columns, pd.MultiIndex):
         sp.columns = sp.columns.droplevel(1)
-    # --- 修正結束 ---
 
     if df.empty or twii.empty or sp.empty:
         return None, None, None
@@ -273,7 +271,7 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
 
         latest_institutional, latest_margin = get_institutional_data(full_code)
 
-        if latest_ institutional is not None:
+        if latest_institutional is not None:
             data_date = latest_institutional['date']
             st.caption(f"資料日期：{data_date}")
 
