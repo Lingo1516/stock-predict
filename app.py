@@ -22,8 +22,10 @@ stock_name_dict = {
     "2330.TW": "台積電",
     "2317.TW": "鴻海",
     "2412.TW": "中華電",
+    "2454.TW": "聯發科",
     "2603.TW": "長榮",
     "2881.TW": "富邦金",
+    "2882.TW": "國泰金",
     "6873.TW": "晶彩科",
 }
 
@@ -37,14 +39,14 @@ def calculate_technical_indicators(df, twii_close):
     df['MA10'] = df['Close'].rolling(10, min_periods=1).mean()
     df['MA20'] = df['Close'].rolling(20, min_periods=1).mean()
 
-    # RSI (Relative Strength Index)
+    # RSI (相對強弱指數)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # MACD (Moving Average Convergence Divergence)
+    # MACD (指數平滑異同移動平均線)
     exp12 = df['Close'].ewm(span=12, adjust=False).mean()
     exp26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
@@ -57,7 +59,7 @@ def calculate_technical_indicators(df, twii_close):
     df['BB_High'] = middle_band + (std_dev * 2)
     df['BB_Low'] = middle_band - (std_dev * 2)
     
-    # ATR (Average True Range)
+    # ATR (平均真實波幅)
     df['TR'] = np.maximum.reduce([
         df['High'] - df['Low'],
         abs(df['High'] - df['Close'].shift(1)),
@@ -65,7 +67,7 @@ def calculate_technical_indicators(df, twii_close):
     ])
     df['ATR'] = df['TR'].ewm(span=14, adjust=False).mean()
     
-    # OBV (On-Balance Volume)
+    # OBV (能量潮指標)
     df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
     
     # 將大盤指數加入
@@ -83,31 +85,12 @@ def generate_mock_institutional_data(df):
     institutional_data['net_buy_sell'] = institutional_data['net_buy_sell'] * (1 + twii_change.fillna(0) * 5)
     return institutional_data
 
-@st.cache_data(ttl=60) # 快取時間縮短為1分鐘，方便偵錯
+@st.cache_data(ttl=600) # 快取10分鐘，避免重複下載
 def get_market_data(stock, start_date, end_date):
-    """下載股票與指數資料 (包含偵錯訊息)"""
-    # --- 偵錯模式開始 ---
-    st.info("🔍 正在進入資料下載偵錯模式...")
-    
-    try:
-        st.write(f"1. 開始下載個股資料: **{stock}**")
-        df = yf.download(stock, start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
-        st.write(f"   > 下載結果：找到 **{len(df)}** 筆資料。")
-
-        st.write(f"2. 開始下載加權指數資料: **^TWII**")
-        twii = yf.download("^TWII", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
-        st.write(f"   > 下載結果：找到 **{len(twii)}** 筆資料。")
-
-        st.write(f"3. 開始下載 S&P 500 指數資料: **^GSPC**")
-        sp = yf.download("^GSPC", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
-        st.write(f"   > 下載結果：找到 **{len(sp)}** 筆資料。")
-
-    except Exception as e:
-        st.error(f"下載過程中發生網路或API錯誤: {e}")
-        return None, None, None
-    
-    st.info("✅ 資料下載偵錯結束。")
-    # --- 偵錯模式結束 ---
+    """下載股票與指數資料"""
+    df = yf.download(stock, start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
+    twii = yf.download("^TWII", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
+    sp = yf.download("^GSPC", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
 
     # 處理 yfinance 可能回傳 MultiIndex 欄位的問題，將其 "壓平"
     if isinstance(df.columns, pd.MultiIndex):
@@ -117,18 +100,10 @@ def get_market_data(stock, start_date, end_date):
     if isinstance(sp.columns, pd.MultiIndex):
         sp.columns = sp.columns.droplevel(1)
 
-    # 檢查是否有任何一個 DataFrame 是空的
     if df.empty or twii.empty or sp.empty:
-        if df.empty:
-            st.warning(f"⚠️ **警告**：無法下載個股 **{stock}** 的資料，導致資料不足。")
-        if twii.empty:
-            st.warning("⚠️ **警告**：無法下載台灣加權指數 (^TWII) 的資料，導致資料不足。")
-        if sp.empty:
-            st.warning("⚠️ **警告**：無法下載 S&P 500 指數 (^GSPC) 的資料，導致資料不足。")
         return None, None, None
         
     return df, twii, sp
-
 
 @st.cache_data(ttl=1800) # 快取30分鐘
 def predict_next_5(stock, days, decay_factor):
@@ -140,8 +115,7 @@ def predict_next_5(stock, days, decay_factor):
         df, twii, sp = get_market_data(stock, start, end)
 
         if df is None or len(df) < 50:
-            # get_market_data 函式內部已經提供了詳細的警告訊息
-            # st.error(f"資料不足 (僅 {len(df) if df is not None else 0} 筆)，無法進行有效預測。")
+            st.error(f"資料不足 (僅 {len(df) if df is not None else 0} 筆)，無法進行有效預測。")
             return None, None
 
         df = calculate_technical_indicators(df, twii['Close'])
@@ -199,7 +173,7 @@ def get_institutional_data(stock_code):
         # 您可以在 FinMind 官網免費註冊取得 token，以獲得更高的 API 使用額度
         # api.login_by_token(api_token='YOUR_FINMIND_API_TOKEN') 
         today_str = dt.datetime.now().strftime("%Y-%m-%d")
-        start_str = (dt.datetime.now() - dt.timedelta(days=10)).strftime("%Y-%m-%d")
+        start_str = (dt.datetime.now() - dt.timedelta(days=30)).strftime("%Y-%m-%d")
         stock_id = stock_code.replace(".TW", "")
 
         df_institutional = api.taiwan_stock_institutional_investors(
@@ -209,14 +183,15 @@ def get_institutional_data(stock_code):
             stock_id=stock_id, start_date=start_str, end_date=today_str
         )
 
-        if df_institutional.empty: return None, None
+        if df_institutional.empty: 
+            return None, None
         
         latest_institutional = df_institutional.iloc[-1]
         latest_margin = df_margin.iloc[-1] if not df_margin.empty else None
         
         return latest_institutional, latest_margin
     except Exception as e:
-        st.warning(f"抓取籌碼資料時發生錯誤: {e}。可能是API請求次數達到上限。")
+        st.warning(f"抓取籌碼資料時發生錯誤: {e}。可能是API請求次數達到上限或FinMind服務暫時中斷。")
         return None, None
 
 # --------------------------------------------------------------------------
@@ -304,9 +279,12 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
             data_date = latest_institutional['date']
             st.caption(f"資料日期：{data_date}")
 
-            foreign_net = latest_institutional['Foreign_Investor_diff']
-            trust_net = latest_institutional['Investment_Trust_diff']
-            dealer_net = latest_institutional['Dealer_diff']
+            # --- 修正開始：將欄位名稱改為小寫 ---
+            foreign_net = latest_institutional['foreign_investor_diff']
+            trust_net = latest_institutional['investment_trust_diff']
+            dealer_net = latest_institutional['dealer_diff']
+            # --- 修正結束 ---
+            
             total_institutional = foreign_net + trust_net + dealer_net
             
             chip_col1, chip_col2, chip_col3, chip_col4 = st.columns(4)
@@ -318,7 +296,9 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
                 st.metric("自營商買賣超 (張)", f"{dealer_net:,.0f}")
             
             if latest_margin is not None:
-                margin_balance = latest_margin['Margin_Purchase_balance']
+                # --- 修正開始：將欄位名稱改為小寫 ---
+                margin_balance = latest_margin['margin_purchase_balance']
+                # --- 修正結束 ---
                 with chip_col4:
                     st.metric("融資餘額 (張)", f"{margin_balance:,.0f}")
             
