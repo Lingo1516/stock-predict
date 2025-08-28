@@ -6,20 +6,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error
 from datetime import datetime
-import time
 import datetime as dt # 使用 dt 別名避免衝突
 
-# --- 安裝並載入 FinMind ---
 # FinMind 用於抓取台灣股市的三大法人與融資融券資料
-try:
-    from FinMind.data import DataLoader
-except ImportError:
-    st.error("FinMind 套件未安裝，正在嘗試安裝...")
-    import subprocess
-    subprocess.check_call(["pip", "install", "FinMind"])
-    from FinMind.data import DataLoader
+from FinMind.data import DataLoader
+
 
 # --------------------------------------------------------------------------
 # 初始設定與資料字典
@@ -244,12 +236,16 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
                     '漲跌': '{:+.2f}',
                     '漲跌幅 (%)': '{:+.2f}%'
                 }).apply(lambda x: x.map(color_change), subset=['漲跌', '漲跌幅 (%)']), use_container_width=True)
-            
+        
         with main_col2:
             st.header("📈 預測趨勢圖")
             if forecast:
+                # 取得最新收盤價的日期
+                df_for_date, _, _ = get_market_data(full_code, dt.date.today() - dt.timedelta(days=10), dt.date.today() + dt.timedelta(days=1))
+                latest_date = pd.to_datetime(df_for_date.index[-1].date())
+
                 chart_data = pd.DataFrame({
-                    '日期': [pd.to_datetime(df.index[-1].date())] + [pd.to_datetime(d) for d in forecast.keys()],
+                    '日期': [latest_date] + [pd.to_datetime(d) for d in forecast.keys()],
                     '股價': [last_close] + list(forecast.values())
                 })
                 st.line_chart(chart_data.set_index('日期'))
@@ -287,7 +283,7 @@ if st.button("🔮 開始預測", type="primary", use_container_width=True):
             elif total_institutional < 0:
                 st.error(f"📉 三大法人合計： **賣超 {abs(total_institutional):,.0f} 張**")
             else:
-                 st.info(f"三大法人合計： **持平**")
+                st.info(f"三大法人合計： **持平**")
         else:
             st.warning("今日盤後籌碼資料尚未公佈，或查無該股票籌碼資料。")
             
