@@ -83,12 +83,31 @@ def generate_mock_institutional_data(df):
     institutional_data['net_buy_sell'] = institutional_data['net_buy_sell'] * (1 + twii_change.fillna(0) * 5)
     return institutional_data
 
-@st.cache_data(ttl=600) # 快取10分鐘，避免重複下載
+@st.cache_data(ttl=60) # 快取時間縮短為1分鐘，方便偵錯
 def get_market_data(stock, start_date, end_date):
-    """下載股票與指數資料"""
-    df = yf.download(stock, start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
-    twii = yf.download("^TWII", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
-    sp = yf.download("^GSPC", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
+    """下載股票與指數資料 (包含偵錯訊息)"""
+    # --- 偵錯模式開始 ---
+    st.info("🔍 正在進入資料下載偵錯模式...")
+    
+    try:
+        st.write(f"1. 開始下載個股資料: **{stock}**")
+        df = yf.download(stock, start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
+        st.write(f"   > 下載結果：找到 **{len(df)}** 筆資料。")
+
+        st.write(f"2. 開始下載加權指數資料: **^TWII**")
+        twii = yf.download("^TWII", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
+        st.write(f"   > 下載結果：找到 **{len(twii)}** 筆資料。")
+
+        st.write(f"3. 開始下載 S&P 500 指數資料: **^GSPC**")
+        sp = yf.download("^GSPC", start=start_date, end=end_date, interval="1d", auto_adjust=True, progress=False)
+        st.write(f"   > 下載結果：找到 **{len(sp)}** 筆資料。")
+
+    except Exception as e:
+        st.error(f"下載過程中發生網路或API錯誤: {e}")
+        return None, None, None
+    
+    st.info("✅ 資料下載偵錯結束。")
+    # --- 偵錯模式結束 ---
 
     # 處理 yfinance 可能回傳 MultiIndex 欄位的問題，將其 "壓平"
     if isinstance(df.columns, pd.MultiIndex):
@@ -98,9 +117,18 @@ def get_market_data(stock, start_date, end_date):
     if isinstance(sp.columns, pd.MultiIndex):
         sp.columns = sp.columns.droplevel(1)
 
+    # 檢查是否有任何一個 DataFrame 是空的
     if df.empty or twii.empty or sp.empty:
+        if df.empty:
+            st.warning(f"⚠️ **警告**：無法下載個股 **{stock}** 的資料，導致資料不足。")
+        if twii.empty:
+            st.warning("⚠️ **警告**：無法下載台灣加權指數 (^TWII) 的資料，導致資料不足。")
+        if sp.empty:
+            st.warning("⚠️ **警告**：無法下載 S&P 500 指數 (^GSPC) 的資料，導致資料不足。")
         return None, None, None
+        
     return df, twii, sp
+
 
 @st.cache_data(ttl=1800) # 快取30分鐘
 def predict_next_5(stock, days, decay_factor):
@@ -112,7 +140,8 @@ def predict_next_5(stock, days, decay_factor):
         df, twii, sp = get_market_data(stock, start, end)
 
         if df is None or len(df) < 50:
-            st.error(f"資料不足 (僅 {len(df) if df is not None else 0} 筆)，無法進行有效預測。")
+            # get_market_data 函式內部已經提供了詳細的警告訊息
+            # st.error(f"資料不足 (僅 {len(df) if df is not None else 0} 筆)，無法進行有效預測。")
             return None, None
 
         df = calculate_technical_indicators(df, twii['Close'])
