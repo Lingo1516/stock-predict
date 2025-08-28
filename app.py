@@ -550,4 +550,77 @@ if st.button("🔮 開始分析", type="primary", use_container_width=True):
                     st.write(f"🔴 **潛在賣點**: {max_date} @ ${max_price:.2f}")
 
             with main_col2:
-                st.subheader("📅 未來 5 日預
+                st.subheader("📅 未來 5 日預測")
+                if forecast and df_with_indicators is not None and not df_with_indicators.empty:
+                    forecast_df = pd.DataFrame(list(forecast.items()), columns=['日期', '預測股價'])
+                    forecast_df['漲跌'] = forecast_df['預測股價'] - last
+                    forecast_df['漲跌幅 (%)'] = (forecast_df['漲跌'] / last) * 100
+                    
+                    def color_change(val):
+                        color = 'red' if val > 0 else 'green' if val < 0 else 'gray'
+                        return f'color: {color}'
+                    
+                    st.dataframe(forecast_df.style.format({
+                        '預測股價': '${:,.2f}',
+                        '漲跌': '{:+.2f}',
+                        '漲跌幅 (%)': '{:+.2f}%'
+                    }).apply(lambda x: x.map(color_change), subset=['漲跌', '漲跌幅 (%)']), use_container_width=True)
+
+            st.subheader("📈 預測趨勢圖")
+            if forecast and df_with_indicators is not None and not df_with_indicators.empty:
+                chart_data = pd.DataFrame({
+                    '日期': [df_with_indicators.index[-1].date()] + list(forecast.keys()),
+                    '股價': [last] + list(forecast.values())
+                })
+                st.line_chart(chart_data.set_index('日期'))
+        else:
+            st.warning("⚠️ 數據量不足，無法執行 AI 預測模型。")
+
+        st.markdown("---")
+
+        # --- 技術分析訊號區塊 ---
+        st.subheader("🔍 技術分析訊號")
+        
+        # 執行買/賣點分析
+        if not is_low_volume_stock:
+            bottom_fishing_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="normal")
+            summary_col1, summary_col2 = st.columns([1, 2])
+            with summary_col1:
+                st.metric(f"是否符合{bottom_fishing_summary['動作']}訊號", "✅ 符合" if bottom_fishing_summary["是否符合訊號"] else "❌ 不符合")
+                st.write(f"**理由**: {bottom_fishing_summary['理由']}")
+            with summary_col2:
+                st.write(f"**{bottom_fishing_summary['風險']}**: ${bottom_fishing_summary['建議停損']:.2f} (ATR ≈ {bottom_fishing_summary['估計ATR']:.2f})")
+                st.write(f"**建議{bottom_fishing_summary['動作']}股數**: {bottom_fishing_summary['建議股數']:,} 股")
+        else:
+            # 執行新上市/低成交量股票的分析
+            low_volume_summary, _ = evaluate_latest(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="low_volume")
+            st.warning("ℹ️ 數據量不足，已切換至「新上市/低成交量」簡易分析模式。")
+            summary_col1, summary_col2 = st.columns([1, 2])
+            with summary_col1:
+                st.metric(f"是否符合{low_volume_summary['動作']}訊號", "✅ 符合" if low_volume_summary["是否符合訊號"] else "❌ 不符合")
+                st.write(f"**理由**: {low_volume_summary['理由']}")
+            with summary_col2:
+                st.write(f"**分析註記**: {low_volume_summary['風險']}")
+                st.write(f"**風險控管**：此模式未提供基於ATR的停損建議，請自行評估。")
+
+        st.markdown("---")
+
+        # --- 事後驗證區塊 ---
+        st.subheader(f"📜 簡易事後驗證 (近一年 - {strategy_type})")
+        
+        # 判斷是否顯示回測結果
+        if not is_low_volume_stock:
+            stat = simple_forward_test(df_with_indicators, CFG, strategy_type="buy" if strategy_type == "買進策略" else "sell", analysis_mode="normal")
+            if stat['樣本數'] > 0:
+                st.write(f"**分析天數**: {CFG.backtest_lookback_days} 日")
+                st.write(f"**訊號樣本數**: {stat['樣本數']}")
+                st.write(f"**勝率 (>0%)**: {stat['勝率(>0%)']}%")
+                st.write(f"**{CFG.fwd_days} 日最佳中位數報酬**: {stat[f'{CFG.fwd_days}日最佳中位數']}%")
+                st.write(f"**平均報酬**: {stat['平均']}%")
+            else:
+                st.warning("⚠️ 在指定的回看期間內未找到符合條件的訊號，無法進行回測。")
+        else:
+            st.warning("⚠️ 數據量不足，無法執行歷史回測。")
+
+st.markdown("---")
+st.caption("⚠️ 此程式碼僅供學術研究與參考，不構成任何投資建議。投資有風險，請謹慎決策。")
