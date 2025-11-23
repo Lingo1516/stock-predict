@@ -302,7 +302,7 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
 
     fig.update_layout(
         height=600,
-        title_text="股價技術分析圖 (Hybrid Model)",
+        title_text="股價技術分析圖 (Hybrid Model + 趨勢安全閥)",
         xaxis_rangeslider_visible=False,
         hovermode='x unified'
     )
@@ -387,7 +387,9 @@ def predict_next_5(stock, days, decay_factor):
             df.columns = [col[0] for col in df.columns]
 
         if ".TW" in stock.upper():
-            market_index = "^TWII"
+            # 修正：針對台股電子股，參考費城半導體指數 (^SOX) 可能比 S&P 500 更準
+            # 但 yfinance 代號有時會變，這裡先用 Nasdaq (^IXIC) 作為科技股代表
+            market_index = "^IXIC" 
         else:
             market_index = "^GSPC"
             
@@ -450,10 +452,34 @@ def predict_next_5(stock, days, decay_factor):
         st.sidebar.info(f"模型 RMSE: {rmse:.2f} (Hybrid)")
 
     # === 計算歷史軌跡 (Backtest Line) ===
+    # 關鍵修正：在計算歷史軌跡時，也應用「趨勢安全閥」邏輯
     all_inputs_scaled = scaler.transform(X)
     trend_all = model_trend.predict(all_inputs_scaled)
     resid_all = model_rf.predict(all_inputs_scaled)
-    df['AI_Pred'] = trend_all + resid_all
+    raw_pred_all = trend_all + resid_all
+    
+    # 應用安全閥 (History Correction)
+    # 這裡我們回測過去每一天，如果當時跌破 MA20，就修正該天的預測值
+    corrected_preds = []
+    ma20_series = df['MA20'].values
+    close_series = df['Close'].values
+    
+    for i in range(len(raw_pred_all)):
+        base_p = raw_pred_all[i]
+        curr_ma20 = ma20_series[i]
+        curr_close = close_series[i]
+        
+        # 安全閥邏輯：如果股價在月線下，且預測值比實際股價高太多，強制下壓
+        if curr_close < curr_ma20:
+             # 計算乖離
+             bias = (curr_close - curr_ma20) / curr_ma20
+             # 給予修正
+             correction = base_p * (bias * 0.5) # 修正係數
+             corrected_preds.append(base_p + correction)
+        else:
+             corrected_preds.append(base_p)
+             
+    df['AI_Pred'] = corrected_preds
 
     # === 未來預測 ===
     simulation_df = df.tail(100).copy()
@@ -472,6 +498,20 @@ def predict_next_5(stock, days, decay_factor):
         pred_trend = model_trend.predict(current_input_scaled)[0]
         pred_resid = model_rf.predict(current_input_scaled)[0]
         base_pred = pred_trend + pred_resid
+        
+        # === 關鍵修正：趨勢安全閥 (Trend Safety Valve) ===
+        # 模擬「大人」的思維：如果現在已經跌破 MA20，不要盲目看多
+        curr_ma20 = simulation_df['MA20'].iloc[-1]
+        curr_close = simulation_df['Close'].iloc[-1]
+        
+        if curr_close < curr_ma20:
+            # 處於弱勢區，強制對「線性回歸的趨勢」打折
+            # 計算乖離率 (例如 -5%)
+            bias = (curr_close - curr_ma20) / curr_ma20
+            # 修正幅度：趨勢預測 * 乖離率 * 係數
+            # 這會讓預測值往下彎，符合空頭慣性
+            correction = base_pred * (bias * 0.5) 
+            base_pred = base_pred + correction
         
         noise = np.random.normal(0, current_atr * 0.2) 
         final_pred = base_pred + noise
