@@ -53,7 +53,7 @@ class Config:
 
 CFG = Config()
 
-# ====== 核心功能：技術指標計算 (封裝以便重複使用) ======
+# ====== 核心功能：技術指標計算 ======
 def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     df = df.copy()
     close = df['Close']
@@ -107,7 +107,7 @@ def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     
     return df
 
-# ====== 輔助計算工具 (相容舊代碼) ======
+# ====== 輔助計算工具 ======
 def calc_kd(df: pd.DataFrame, k=9, d=3, smooth=3):
     return df['K'], df['D']
 
@@ -309,12 +309,18 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='MA60'), row=1, col=1)
 
+    # 新增：AI 歷史軌跡 (紫色虛線)
+    if 'AI_Pred' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['AI_Pred'], 
+                                 line=dict(color='purple', width=1.5, dash='dot'),
+                                 name='AI 歷史軌跡 (Model Fit)'), row=1, col=1)
+
     if forecast_dates and forecast_prices:
         connect_x = [df.index[-1]] + list(forecast_dates)
         connect_y = [df['Close'].iloc[-1]] + list(forecast_prices)
         fig.add_trace(go.Scatter(x=connect_x, y=connect_y, 
                                  line=dict(color='red', width=2, dash='dash'), 
-                                 name='AI預測'), row=1, col=1)
+                                 name='AI 未來預測'), row=1, col=1)
 
     colors = ['red' if row['Open'] - row['Close'] >= 0 else 'green' for index, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
@@ -388,7 +394,6 @@ def predict_next_5(stock, days, decay_factor):
     weights = np.exp(-decay_factor * np.arange(len(X_train))[::-1])
     weights = weights / np.sum(weights)
 
-    # 設定 random_state 以確保基礎預測的一致性
     np.random.seed(42)
     model = RandomForestRegressor(n_estimators=100, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
     model.fit(X_train, y_train, sample_weight=weights)
@@ -397,6 +402,11 @@ def predict_next_5(stock, days, decay_factor):
         y_pred_val = model.predict(X_val)
         rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
         st.sidebar.info(f"模型 RMSE: {rmse:.2f}")
+
+    # === 新增功能：計算歷史預測軌跡 (Backtest Line) ===
+    # 用訓練好的模型，去跑一遍所有的歷史數據，畫出「AI 眼中的合理價格」
+    all_inputs_scaled = scaler.transform(X)
+    df['AI_Pred'] = model.predict(all_inputs_scaled)
 
     # === 極致改進的遞迴預測 (Dynamic Indicator Re-calculation + Stochastic Injection) ===
     
@@ -410,23 +420,17 @@ def predict_next_5(stock, days, decay_factor):
     current_atr = simulation_df['ATR'].iloc[-1]
 
     for date in future_dates:
-        # 1. 提取當前最後一筆的特徵
         last_row_feats = simulation_df[feats].iloc[-1:].values
         current_input_scaled = scaler.transform(last_row_feats)
         
-        # 2. 預測收盤價 (基礎預測)
         base_pred = model.predict(current_input_scaled)[0]
         
-        # 3. 注入隨機波動 (Stochastic Injection)
-        # 解決 Random Forest 數值僵固的問題，加入 ATR 15% 左右的雜訊
-        # 這模擬了市場在趨勢中的隨機擺盪，強迫模型在下一步看到不同的輸入
         noise = np.random.normal(0, current_atr * 0.15)
         final_pred = base_pred + noise
         
         predictions[date.date()] = float(final_pred)
         predicted_prices.append(final_pred)
         
-        # 4. 模擬新的一行資料
         prev_close = simulation_df['Close'].iloc[-1]
         sim_open = prev_close
         sim_high = max(sim_open, final_pred) + (current_atr * 0.2)
@@ -437,16 +441,14 @@ def predict_next_5(stock, days, decay_factor):
             'Open': [sim_open],
             'High': [sim_high],
             'Low': [sim_low],
-            'Close': [final_pred], # 使用帶有雜訊的預測值回饋
+            'Close': [final_pred],
             'Volume': [sim_vol],
             'Market_Close': [simulation_df['Market_Close'].iloc[-1]]
         }, index=[date])
         
-        # 5. 將新資料併入並重算指標
         simulation_df = pd.concat([simulation_df, new_row])
         simulation_df = add_technical_indicators(simulation_df, CFG)
         
-        # 更新 ATR
         current_atr = simulation_df['ATR'].iloc[-1]
     
     preds_dict = {f'T+{i + 1}': p for i, p in enumerate(predicted_prices)}
@@ -570,7 +572,7 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
                 st.info(f"AI 建議: **{advice}**")
 
         with col2:
-            st.markdown("### 📈 互動式 K 線圖")
+            st.markdown("### 📈 互動式 K 線圖 (含 AI 歷史軌跡)")
             
             forecast_dates = list(forecast.keys()) if forecast else []
             forecast_vals = list(forecast.values()) if forecast else []
