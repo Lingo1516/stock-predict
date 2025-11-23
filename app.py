@@ -21,9 +21,6 @@ try:
 except ImportError:
     HAS_PLOTLY = False
 
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
 # 設定忽略警告
 import warnings
 warnings.filterwarnings("ignore")
