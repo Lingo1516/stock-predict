@@ -53,34 +53,89 @@ class Config:
 
 CFG = Config()
 
-# ====== 技術指標計算工具 ======
-def calc_kd(df: pd.DataFrame, k=9, d=3, smooth=3):
-    stoch = StochasticOscillator(high=df['High'], low=df['Low'], close=df['Close'], window=k, smooth_window=smooth)
+# ====== 核心功能：技術指標計算 (封裝以便重複使用) ======
+def add_technical_indicators(df: pd.DataFrame, cfg: Config):
+    df = df.copy()
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+    
+    # 基礎均線
+    df['MA5'] = close.rolling(5).mean()
+    df['MA10'] = close.rolling(10).mean()
+    df['MA20'] = close.rolling(20).mean()
+    df['MA60'] = close.rolling(60).mean()
+    df['MA_S'] = df['MA20']
+    df['MA_L'] = df['MA60']
+    df['MA_S_SLOPE'] = df['MA_S'] - df['MA_S'].shift(5)
+
+    # 進階指標
+    df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
+    
+    macd = ta.trend.MACD(close)
+    df['MACD'] = macd.macd_diff()
+    df['MACD_SIGNAL'] = macd.macd_signal()
+    
+    bb = BollingerBands(close, window=20, window_dev=2)
+    df['BB_High'] = bb.bollinger_hband()
+    df['BB_Low'] = bb.bollinger_lband()
+    
+    df['ADX'] = ADXIndicator(high, low, close, window=14).adx()
+    
+    # 滯後特徵
+    df['Prev_Close'] = close.shift(1)
+    for i in range(1, 4):
+        df[f'Prev_Close_Lag{i}'] = close.shift(i)
+        
+    df['Volatility'] = close.rolling(10).std()
+    
+    # KD
+    stoch = StochasticOscillator(high=high, low=low, close=close, window=cfg.stoch_k, smooth_window=cfg.stoch_smooth)
     df['K'] = stoch.stoch()
     df['D'] = stoch.stoch_signal()
+    
+    # ATR
+    atr_indicator = ta.volatility.AverageTrueRange(high, low, close, window=cfg.atr_period)
+    df['ATR'] = atr_indicator.average_true_range()
+    
+    # 策略用特徵
+    df['RecentLow'] = close.rolling(cfg.bottom_lookback).min()
+    df['PriorHigh'] = close.shift(1).rolling(cfg.higher_high_lookback).max()
+    df['RecentHigh'] = close.rolling(cfg.top_lookback).max()
+    df['PriorLow'] = close.shift(1).rolling(cfg.lower_low_lookback).min()
+    df['VOL_MA'] = df['Volume'].rolling(cfg.volume_ma).mean()
+    
+    return df
+
+# ====== 輔助計算工具 (相容舊代碼) ======
+def calc_kd(df: pd.DataFrame, k=9, d=3, smooth=3):
     return df['K'], df['D']
 
 def calc_atr(df: pd.DataFrame, period=14):
-    atr_indicator = ta.volatility.AverageTrueRange(df['High'], df['Low'], df['Close'], window=period)
-    return atr_indicator.average_true_range()
+    return df['ATR']
 
 # ====== 訊號生成邏輯 ======
 def generate_signal_row_buy(row_prior, row_now, cfg: Config):
     reasons = []
+    # 1) 底部條件
     bottom_built = (row_now['Close'] <= row_now['RecentLow'] * 1.08) and (row_now['Close'] > (row_now['PriorHigh'] * 0.8))
     if bottom_built: reasons.append("接近近期低點後回升")
 
+    # 2) KD 黃金交叉且脫離超賣區
     kd_cross_up = (row_prior['K'] < row_prior['D']) and (row_now['K'] > row_now['D'])
     kd_above_threshold = row_now['K'] > cfg.kd_threshold
     kd_ok = kd_cross_up and kd_above_threshold
     if kd_ok: reasons.append(f"KD黃金交叉且K>{cfg.kd_threshold:.0f}")
 
+    # 3) MACD 柱轉正且放大
     macd_hist_up = (row_now['MACD'] > 0) and (row_now['MACD'] > row_prior['MACD'])
     if macd_hist_up: reasons.append("MACD柱轉正且走揚")
 
+    # 4) 趨勢濾網
     trend_ok = (row_now['MA_S'] > row_now['MA_L']) and (row_now['MA_S_SLOPE'] > 0)
     if trend_ok: reasons.append("多頭趨勢濾網通過")
 
+    # 5) 量能濾網
     volume_ok = row_now['Volume'] >= row_now['VOL_MA']
     if volume_ok: reasons.append("量能不弱於均量")
 
@@ -89,20 +144,25 @@ def generate_signal_row_buy(row_prior, row_now, cfg: Config):
 
 def generate_signal_row_sell(row_prior, row_now, cfg: Config):
     reasons = []
+    # 1) 頭部條件
     top_built = (row_now['Close'] >= row_now['RecentHigh'] * 0.92) and (row_now['Close'] < (row_now['PriorLow'] * 1.2))
     if top_built: reasons.append("接近近期高點後回落")
 
+    # 2) KD 死亡交叉且脫離超買區
     kd_cross_down = (row_prior['K'] > row_prior['D']) and (row_now['K'] < row_now['D'])
     kd_below_threshold = row_now['K'] < cfg.kd_threshold_sell
     kd_ok_sell = kd_cross_down and kd_below_threshold
     if kd_ok_sell: reasons.append(f"KD死亡交叉且K<{cfg.kd_threshold_sell:.0f}")
 
+    # 3) MACD 柱轉負且縮小
     macd_hist_down = (row_now['MACD'] < 0) and (row_now['MACD'] < row_prior['MACD'])
     if macd_hist_down: reasons.append("MACD柱轉負且走弱")
 
+    # 4) 趨勢濾網
     trend_ok_sell = (row_now['MA_S'] < row_now['MA_L']) and (row_now['MA_S_SLOPE'] < 0)
     if trend_ok_sell: reasons.append("空頭趨勢濾網通過")
 
+    # 5) 量能濾網
     volume_ok_sell = row_now['Volume'] >= row_now['VOL_MA']
     if volume_ok_sell: reasons.append("量能不弱於均量")
 
@@ -303,46 +363,14 @@ def predict_next_5(stock, days, decay_factor):
 
     df['Market_Close'] = idx_df['Close'].reindex(df.index).ffill()
     
-    close = df['Close']
-    df['MA5'] = close.rolling(5).mean()
-    df['MA10'] = close.rolling(10).mean()
-    df['MA20'] = close.rolling(20).mean()
-    df['MA60'] = close.rolling(60).mean()
-    df['MA_S'] = df['MA20']
-    df['MA_L'] = df['MA60']
-    df['MA_S_SLOPE'] = df['MA_S'] - df['MA_S'].shift(5)
-
-    df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
-    macd = ta.trend.MACD(close)
-    df['MACD'] = macd.macd_diff()
-    df['MACD_SIGNAL'] = macd.macd_signal()
-    
-    bb = BollingerBands(close, window=20, window_dev=2)
-    df['BB_High'] = bb.bollinger_hband()
-    df['BB_Low'] = bb.bollinger_lband()
-    
-    df['ADX'] = ADXIndicator(df['High'], df['Low'], close, window=14).adx()
-    df['Prev_Close'] = close.shift(1)
-    for i in range(1, 4):
-        df[f'Prev_Close_Lag{i}'] = close.shift(i)
-        
-    df['Volatility'] = close.rolling(10).std()
-    df['K'], df['D'] = calc_kd(df, CFG.stoch_k, CFG.stoch_d, CFG.stoch_smooth)
-    df['ATR'] = calc_atr(df, CFG.atr_period)
-    
-    df['RecentLow'] = df['Close'].rolling(CFG.bottom_lookback).min()
-    df['PriorHigh'] = df['Close'].shift(1).rolling(CFG.higher_high_lookback).max()
-    df['RecentHigh'] = df['Close'].rolling(CFG.top_lookback).max()
-    df['PriorLow'] = df['Close'].shift(1).rolling(CFG.lower_low_lookback).min()
-    df['VOL_MA'] = df['Volume'].rolling(CFG.volume_ma).mean()
-
+    # 第一次計算完整指標 (用於訓練)
+    df = add_technical_indicators(df, CFG)
     df = df.dropna()
     
     if len(df) < 30:
         return None, None, None, df
 
     # === 機器學習模型 ===
-    # 確保特徵順序一致
     feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'RSI', 'MACD', 
              'Market_Close', 'Volatility', 'BB_High', 'BB_Low', 'ADX']
     
@@ -360,6 +388,8 @@ def predict_next_5(stock, days, decay_factor):
     weights = np.exp(-decay_factor * np.arange(len(X_train))[::-1])
     weights = weights / np.sum(weights)
 
+    # 設定 random_state 以確保基礎預測的一致性
+    np.random.seed(42)
     model = RandomForestRegressor(n_estimators=100, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
     model.fit(X_train, y_train, sample_weight=weights)
 
@@ -368,55 +398,56 @@ def predict_next_5(stock, days, decay_factor):
         rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
         st.sidebar.info(f"模型 RMSE: {rmse:.2f}")
 
-    # === 改進後的遞迴預測 (Autoregressive) ===
-    last_features_raw = X[-1:].copy() # 取得最後一筆原始特徵
-    history_closes = df['Close'].tail(60).tolist() # 用於計算 MA
-
+    # === 極致改進的遞迴預測 (Dynamic Indicator Re-calculation + Stochastic Injection) ===
+    
+    simulation_df = df.tail(100).copy()
+    future_dates = pd.bdate_range(start=df.index[-1], periods=6)[1:]
+    
     predictions = {}
     predicted_prices = []
-    future_dates = pd.bdate_range(start=df.index[-1], periods=6)[1:]
     last_close_real = y[-1]
-
-    current_features_raw = last_features_raw.copy()
+    
+    current_atr = simulation_df['ATR'].iloc[-1]
 
     for date in future_dates:
-        # 1. 標準化當前特徵
-        current_input_scaled = scaler.transform(current_features_raw)
+        # 1. 提取當前最後一筆的特徵
+        last_row_feats = simulation_df[feats].iloc[-1:].values
+        current_input_scaled = scaler.transform(last_row_feats)
         
-        # 2. 預測
-        pred_price = model.predict(current_input_scaled)[0]
-        predictions[date.date()] = float(pred_price)
-        predicted_prices.append(pred_price)
+        # 2. 預測收盤價 (基礎預測)
+        base_pred = model.predict(current_input_scaled)[0]
         
-        # 3. 更新特徵 (為了下一次預測)
-        # 更新歷史價格清單
-        history_closes.append(pred_price)
-        history_closes.pop(0) # 保持長度一致
+        # 3. 注入隨機波動 (Stochastic Injection)
+        # 解決 Random Forest 數值僵固的問題，加入 ATR 15% 左右的雜訊
+        # 這模擬了市場在趨勢中的隨機擺盪，強迫模型在下一步看到不同的輸入
+        noise = np.random.normal(0, current_atr * 0.15)
+        final_pred = base_pred + noise
         
-        # 手動更新關鍵特徵 (根據特徵列表的索引)
-        # feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'RSI', 'MACD', 
-        #          'Market_Close', 'Volatility', 'BB_High', 'BB_Low', 'ADX']
+        predictions[date.date()] = float(final_pred)
+        predicted_prices.append(final_pred)
         
-        # Idx 0: Prev_Close (下一次預測的 Prev_Close 就是這次預測的價格)
-        current_features_raw[0, 0] = pred_price
+        # 4. 模擬新的一行資料
+        prev_close = simulation_df['Close'].iloc[-1]
+        sim_open = prev_close
+        sim_high = max(sim_open, final_pred) + (current_atr * 0.2)
+        sim_low = min(sim_open, final_pred) - (current_atr * 0.2)
+        sim_vol = simulation_df['Volume'].mean()
         
-        # Idx 1: MA5
-        current_features_raw[0, 1] = np.mean(history_closes[-5:])
-        # Idx 2: MA10
-        current_features_raw[0, 2] = np.mean(history_closes[-10:])
-        # Idx 3: MA20
-        current_features_raw[0, 3] = np.mean(history_closes[-20:])
+        new_row = pd.DataFrame({
+            'Open': [sim_open],
+            'High': [sim_high],
+            'Low': [sim_low],
+            'Close': [final_pred], # 使用帶有雜訊的預測值回饋
+            'Volume': [sim_vol],
+            'Market_Close': [simulation_df['Market_Close'].iloc[-1]]
+        }, index=[date])
         
-        # Idx 7: Volatility (10日標準差)
-        std_10 = np.std(history_closes[-10:])
-        current_features_raw[0, 7] = std_10
+        # 5. 將新資料併入並重算指標
+        simulation_df = pd.concat([simulation_df, new_row])
+        simulation_df = add_technical_indicators(simulation_df, CFG)
         
-        # Idx 8, 9: BB_High, BB_Low (MA20 +/- 2*std)
-        ma20 = current_features_raw[0, 3]
-        current_features_raw[0, 8] = ma20 + 2 * std_10
-        current_features_raw[0, 9] = ma20 - 2 * std_10
-        
-        # 註: RSI, MACD 等複雜指標暫時維持不變，避免無數據下的錯誤震盪
+        # 更新 ATR
+        current_atr = simulation_df['ATR'].iloc[-1]
     
     preds_dict = {f'T+{i + 1}': p for i, p in enumerate(predicted_prices)}
     
@@ -503,7 +534,7 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
                 df_result = pd.read_csv(io.StringIO(manual_data))
                 df_result['Date'] = pd.to_datetime(df_result['Date'])
                 df_result.set_index('Date', inplace=True)
-                df_result['ATR'] = calc_atr(df_result)
+                df_result = add_technical_indicators(df_result, CFG) # 使用統一的計算函式
                 last_price = df_result['Close'].iloc[-1]
                 st.success("資料讀取成功")
             except Exception as e:
