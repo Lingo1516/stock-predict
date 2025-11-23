@@ -286,7 +286,7 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
     if 'AI_Pred' in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df['AI_Pred'], 
                                  line=dict(color='purple', width=2, dash='dot'),
-                                 name='AI 歷史軌跡 (Model Fit)'), row=1, col=1)
+                                 name='AI 歷史軌跡 (穩定混合)'), row=1, col=1)
 
     # AI 未來預測
     if forecast_dates and forecast_prices:
@@ -302,27 +302,23 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
 
     fig.update_layout(
         height=600,
-        title_text="股價技術分析圖 (Hybrid Model + 趨勢安全閥)",
+        title_text="股價技術分析圖 (智慧權重穩定版)",
         xaxis_rangeslider_visible=False,
         hovermode='x unified'
     )
     return fig
 
-# ====== 新增：準確度檢測圖表 (升級版：折線+準確區) ======
+# ====== 新增：準確度檢測圖表 ======
 def plot_accuracy_chart(df):
     if not HAS_PLOTLY or 'AI_Pred' not in df.columns:
         return None
     
     df = df.copy()
-    # 計算誤差百分比
     df['Error_Pct'] = ((df['AI_Pred'] - df['Close']) / df['Close']) * 100
-    
-    # 取最後 60 天
     plot_df = df.tail(60)
     
     fig = go.Figure()
     
-    # 1. 誤差趨勢線
     fig.add_trace(go.Scatter(
         x=plot_df.index,
         y=plot_df['Error_Pct'],
@@ -333,20 +329,17 @@ def plot_accuracy_chart(df):
         hovertemplate='日期: %{x}<br>誤差: %{y:.2f}%<extra></extra>'
     ))
     
-    # 2. 0軸基準線 (完美預測線)
     fig.add_shape(type="line",
         x0=plot_df.index[0], y0=0, x1=plot_df.index[-1], y1=0,
         line=dict(color="white", width=1, dash="dash")
     )
 
-    # 3. 綠色準確區間 (±1.5%)
     fig.add_hrect(
         y0=-1.5, y1=1.5,
         fillcolor="green", opacity=0.15,
         layer="below", line_width=0,
     )
     
-    # 加入文字標註
     fig.add_annotation(
         x=plot_df.index[0], y=1.6,
         text="準確區間 (±1.5%)",
@@ -356,13 +349,9 @@ def plot_accuracy_chart(df):
     )
     
     fig.update_layout(
-        title="🎯 AI 預測誤差趨勢 (越接近 0 軸越準，跑出綠區代表失準)",
+        title="🎯 AI 預測誤差趨勢 (移除隨機雜訊後)",
         yaxis_title="誤差百分比 (%)",
-        yaxis=dict(
-            range=[-5, 5], # 固定範圍，避免極端值破壞比例
-            showgrid=True,
-            zeroline=False
-        ),
+        yaxis=dict(range=[-5, 5], showgrid=True, zeroline=False),
         height=350,
         margin=dict(l=20, r=20, t=40, b=20),
         hovermode="x unified"
@@ -387,8 +376,6 @@ def predict_next_5(stock, days, decay_factor):
             df.columns = [col[0] for col in df.columns]
 
         if ".TW" in stock.upper():
-            # 修正：針對台股電子股，參考費城半導體指數 (^SOX) 可能比 S&P 500 更準
-            # 但 yfinance 代號有時會變，這裡先用 Nasdaq (^IXIC) 作為科技股代表
             market_index = "^IXIC" 
         else:
             market_index = "^GSPC"
@@ -407,14 +394,13 @@ def predict_next_5(stock, days, decay_factor):
 
     df['Market_Close'] = idx_df['Close'].reindex(df.index).ffill()
     
-    # 第一次計算完整指標 (用於訓練)
     df = add_technical_indicators(df, CFG)
     df = df.dropna()
     
     if len(df) < 30:
         return None, None, None, df
 
-    # === 混合模型核心 (Hybrid AI) ===
+    # === 混合模型核心 (智慧權重版) ===
     feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'RSI', 'MACD', 
              'Market_Close', 'Volatility', 'BB_High', 'BB_Low', 'ADX']
     
@@ -432,56 +418,100 @@ def predict_next_5(stock, days, decay_factor):
     weights = np.exp(-decay_factor * np.arange(len(X_train))[::-1])
     weights = weights / np.sum(weights)
 
-    # --- A. 訓練趨勢模型 (Linear Regression) ---
+    # 1. 趨勢模型 (Linear)
     model_trend = LinearRegression()
     model_trend.fit(X_train, y_train, sample_weight=weights)
-    
     trend_pred_train = model_trend.predict(X_train)
     y_train_resid = y_train - trend_pred_train
 
-    # --- B. 訓練波動模型 (Random Forest on Residuals) ---
+    # 2. 波動模型 (RF)
     np.random.seed(42)
     model_rf = RandomForestRegressor(n_estimators=100, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
     model_rf.fit(X_train, y_train_resid, sample_weight=weights)
 
-    if len(X_val) > 0:
-        trend_pred_val = model_trend.predict(X_val)
-        resid_pred_val = model_rf.predict(X_val)
-        y_pred_val = trend_pred_val + resid_pred_val
-        rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
-        st.sidebar.info(f"模型 RMSE: {rmse:.2f} (Hybrid)")
-
-    # === 計算歷史軌跡 (Backtest Line) ===
-    # 關鍵修正：在計算歷史軌跡時，也應用「趨勢安全閥」邏輯
+    # === 計算動態權重 (Determine Market Regime) ===
+    # 用於歷史回測的權重計算
+    ma20_vals = df['MA20'].values
+    ma60_vals = df['MA60'].values
+    adx_vals = df['ADX'].values
+    
+    # 如果 MA20 > MA60 (多頭) 且 ADX > 25 (有趨勢) -> 趨勢權重高
+    # 如果 MA20 < MA60 (空頭/盤整) -> 波動權重高 (均值回歸)
+    
     all_inputs_scaled = scaler.transform(X)
     trend_all = model_trend.predict(all_inputs_scaled)
     resid_all = model_rf.predict(all_inputs_scaled)
-    raw_pred_all = trend_all + resid_all
     
-    # 應用安全閥 (History Correction)
-    # 這裡我們回測過去每一天，如果當時跌破 MA20，就修正該天的預測值
-    corrected_preds = []
-    ma20_series = df['MA20'].values
-    close_series = df['Close'].values
-    
-    for i in range(len(raw_pred_all)):
-        base_p = raw_pred_all[i]
-        curr_ma20 = ma20_series[i]
-        curr_close = close_series[i]
+    final_preds = []
+    for i in range(len(trend_all)):
+        # 簡單的狀態判斷
+        is_bullish = ma20_vals[i] > ma60_vals[i]
+        is_trending = adx_vals[i] > 25
         
-        # 安全閥邏輯：如果股價在月線下，且預測值比實際股價高太多，強制下壓
-        if curr_close < curr_ma20:
-             # 計算乖離
-             bias = (curr_close - curr_ma20) / curr_ma20
-             # 給予修正
-             correction = base_p * (bias * 0.5) # 修正係數
-             corrected_preds.append(base_p + correction)
+        if is_bullish and is_trending:
+            # 強勢多頭：相信趨勢
+            w_trend = 0.8
+            w_resid = 0.2
+        elif not is_bullish:
+            # 空頭或弱勢：相信區間波動 (隨機森林比較保守)
+            w_trend = 0.2
+            w_resid = 0.8
         else:
-             corrected_preds.append(base_p)
-             
-    df['AI_Pred'] = corrected_preds
+            # 盤整：各半
+            w_trend = 0.5
+            w_resid = 0.5
+            
+        final_preds.append(trend_all[i] * w_trend + (trend_all[i] + resid_all[i]) * w_resid) # 注意：resid是加在trend上的，這裡簡化邏輯
+        # 修正公式：
+        # 趨勢模型預測 = trend_all[i]
+        # 波動模型預測 (隱含均值回歸) = trend_all[i] + resid_all[i]
+        # 混合 = (trend_all[i] * w_trend) + ((trend_all[i] + resid_all[i]) * w_resid)
+        
+        # 為了更精確，這裡直接用加權
+        # 若 w_trend 高，代表我們更看重線性延伸
+        # 若 w_resid 高，代表我們更看重 RF 的細節修正
+        pred_val = trend_all[i] + (resid_all[i] * w_resid) # 讓線性回歸當基底，RF 當修正，但修正幅度受控
+        final_preds.append(pred_val)
 
-    # === 未來預測 ===
+    # 重新計算一次更嚴謹的歷史軌跡，這次不再用簡單相加，而是用上述邏輯
+    # 上面的 loop 邏輯有點怪，讓我們統一用更直觀的寫法：
+    # 最終預測 = 線性趨勢 + (隨機森林殘差 * 信心係數)
+    # 信心係數：在盤整時高 (相信回歸)，在趨勢時低 (相信突破... 等等，應該反過來？)
+    # 其實：RF 擅長區間，LR 擅長趨勢。
+    # 所以：
+    # 趨勢盤 -> 讓 LR 主導 (Residual 權重低，不要亂拉回)
+    # 盤整盤 -> 讓 RF 主導 (Residual 權重高，捕捉上下刷)
+    
+    history_preds = []
+    for i in range(len(X)):
+        t_pred = trend_all[i]
+        r_pred = resid_all[i]
+        
+        # 判斷當下狀態
+        curr_adx = adx_vals[i]
+        
+        # 動態調整殘差權重
+        # ADX 低 (盤整) -> 完全接受 RF 的修正 (weight = 1.0)
+        # ADX 高 (趨勢) -> 減少 RF 的修正，讓 LR 發揮 (weight = 0.5)
+        if curr_adx < 20:
+            resid_weight = 1.2 # 加強波動捕捉
+        elif curr_adx > 40:
+            resid_weight = 0.5 # 降低波動干擾，順勢
+        else:
+            resid_weight = 0.9
+            
+        history_preds.append(t_pred + r_pred * resid_weight)
+
+    df['AI_Pred'] = history_preds
+
+    if len(X_val) > 0:
+        # 簡單計算一下驗證集誤差
+        val_start_idx = len(X_train)
+        val_preds = history_preds[val_start_idx:]
+        rmse = np.sqrt(mean_squared_error(y_val, val_preds))
+        st.sidebar.info(f"模型 RMSE: {rmse:.2f} (Stabilized)")
+
+    # === 未來預測 (移除隨機雜訊，改用動態指標重算 + 阻尼) ===
     simulation_df = df.tail(100).copy()
     future_dates = pd.bdate_range(start=df.index[-1], periods=6)[1:]
     
@@ -489,40 +519,47 @@ def predict_next_5(stock, days, decay_factor):
     predicted_prices = []
     last_close_real = y[-1]
     
-    current_atr = simulation_df['ATR'].iloc[-1]
-
     for date in future_dates:
         last_row_feats = simulation_df[feats].iloc[-1:].values
         current_input_scaled = scaler.transform(last_row_feats)
         
         pred_trend = model_trend.predict(current_input_scaled)[0]
         pred_resid = model_rf.predict(current_input_scaled)[0]
-        base_pred = pred_trend + pred_resid
         
-        # === 關鍵修正：趨勢安全閥 (Trend Safety Valve) ===
-        # 模擬「大人」的思維：如果現在已經跌破 MA20，不要盲目看多
+        # 取得當前狀態 (用於預測)
+        curr_adx = simulation_df['ADX'].iloc[-1]
+        
+        # 決定權重
+        if curr_adx < 20:
+            w_resid = 1.2
+        elif curr_adx > 40:
+            w_resid = 0.5
+        else:
+            w_resid = 0.9
+            
+        final_pred = pred_trend + (pred_resid * w_resid)
+        
+        # === 阻尼機制 (Damping) ===
+        # 防止預測值偏離太遠 (例如連續噴出)
+        # 如果預測值 > MA20 + 3*ATR (極端乖離)，強制拉回
         curr_ma20 = simulation_df['MA20'].iloc[-1]
-        curr_close = simulation_df['Close'].iloc[-1]
+        curr_atr = simulation_df['ATR'].iloc[-1]
         
-        if curr_close < curr_ma20:
-            # 處於弱勢區，強制對「線性回歸的趨勢」打折
-            # 計算乖離率 (例如 -5%)
-            bias = (curr_close - curr_ma20) / curr_ma20
-            # 修正幅度：趨勢預測 * 乖離率 * 係數
-            # 這會讓預測值往下彎，符合空頭慣性
-            correction = base_pred * (bias * 0.5) 
-            base_pred = base_pred + correction
+        upper_bound = curr_ma20 + 3 * curr_atr
+        lower_bound = curr_ma20 - 3 * curr_atr
         
-        noise = np.random.normal(0, current_atr * 0.2) 
-        final_pred = base_pred + noise
-        
+        if final_pred > upper_bound:
+            final_pred = upper_bound
+        elif final_pred < lower_bound:
+            final_pred = lower_bound
+            
         predictions[date.date()] = float(final_pred)
         predicted_prices.append(final_pred)
         
-        prev_close = simulation_df['Close'].iloc[-1]
-        sim_open = prev_close
-        sim_high = max(sim_open, final_pred) + (current_atr * 0.2)
-        sim_low = min(sim_open, final_pred) - (current_atr * 0.2)
+        # 模擬下一天 (不加隨機雜訊，只用指標重算)
+        sim_open = final_pred
+        sim_high = final_pred + (curr_atr * 0.2) # 假設微幅波動
+        sim_low = final_pred - (curr_atr * 0.2)
         sim_vol = simulation_df['Volume'].mean()
         
         new_row = pd.DataFrame({
@@ -536,8 +573,6 @@ def predict_next_5(stock, days, decay_factor):
         
         simulation_df = pd.concat([simulation_df, new_row])
         simulation_df = add_technical_indicators(simulation_df, CFG)
-        
-        current_atr = simulation_df['ATR'].iloc[-1]
     
     preds_dict = {f'T+{i + 1}': p for i, p in enumerate(predicted_prices)}
     
