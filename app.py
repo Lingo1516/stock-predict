@@ -83,9 +83,9 @@ def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     
     df['ADX'] = ADXIndicator(high, low, close, window=14).adx()
     
-    # 滯後特徵 (Lag Features) - 增加更多 Lag 以捕捉慣性
+    # 滯後特徵
     df['Prev_Close'] = close.shift(1)
-    for i in range(1, 6): # 增加到 5 天
+    for i in range(1, 6): 
         df[f'Prev_Close_Lag{i}'] = close.shift(i)
         
     df['Volatility'] = close.rolling(10).std()
@@ -115,26 +115,21 @@ def calc_kd(df: pd.DataFrame, k=9, d=3, smooth=3):
 def calc_atr(df: pd.DataFrame, period=14):
     return df['ATR']
 
-# ====== 訊號生成邏輯 ======
+# ====== 訊號生成邏輯 (維持不變) ======
 def generate_signal_row_buy(row_prior, row_now, cfg: Config):
     reasons = []
     bottom_built = (row_now['Close'] <= row_now['RecentLow'] * 1.08) and (row_now['Close'] > (row_now['PriorHigh'] * 0.8))
     if bottom_built: reasons.append("接近近期低點後回升")
-
     kd_cross_up = (row_prior['K'] < row_prior['D']) and (row_now['K'] > row_now['D'])
     kd_above_threshold = row_now['K'] > cfg.kd_threshold
     kd_ok = kd_cross_up and kd_above_threshold
     if kd_ok: reasons.append(f"KD黃金交叉且K>{cfg.kd_threshold:.0f}")
-
     macd_hist_up = (row_now['MACD'] > 0) and (row_now['MACD'] > row_prior['MACD'])
     if macd_hist_up: reasons.append("MACD柱轉正且走揚")
-
     trend_ok = (row_now['MA_S'] > row_now['MA_L']) and (row_now['MA_S_SLOPE'] > 0)
     if trend_ok: reasons.append("多頭趨勢濾網通過")
-
     volume_ok = row_now['Volume'] >= row_now['VOL_MA']
     if volume_ok: reasons.append("量能不弱於均量")
-
     all_ok = bottom_built and kd_ok and macd_hist_up and trend_ok and volume_ok
     return all_ok, reasons
 
@@ -142,32 +137,25 @@ def generate_signal_row_sell(row_prior, row_now, cfg: Config):
     reasons = []
     top_built = (row_now['Close'] >= row_now['RecentHigh'] * 0.92) and (row_now['Close'] < (row_now['PriorLow'] * 1.2))
     if top_built: reasons.append("接近近期高點後回落")
-
     kd_cross_down = (row_prior['K'] > row_prior['D']) and (row_now['K'] < row_now['D'])
     kd_below_threshold = row_now['K'] < cfg.kd_threshold_sell
     kd_ok_sell = kd_cross_down and kd_below_threshold
     if kd_ok_sell: reasons.append(f"KD死亡交叉且K<{cfg.kd_threshold_sell:.0f}")
-
     macd_hist_down = (row_now['MACD'] < 0) and (row_now['MACD'] < row_prior['MACD'])
     if macd_hist_down: reasons.append("MACD柱轉負且走弱")
-
     trend_ok_sell = (row_now['MA_S'] < row_now['MA_L']) and (row_now['MA_S_SLOPE'] < 0)
     if trend_ok_sell: reasons.append("空頭趨勢濾網通過")
-
     volume_ok_sell = row_now['Volume'] >= row_now['VOL_MA']
     if volume_ok_sell: reasons.append("量能不弱於均量")
-
     all_ok = top_built and kd_ok_sell and macd_hist_down and trend_ok_sell and volume_ok_sell
     return all_ok, reasons
 
 def generate_signal_low_volume(df: pd.DataFrame, strategy_type: str):
     reasons = []
     if len(df) < 5: return False, ["資料量不足"]
-
     row_now = df.iloc[-1]
     last_volume = row_now['Volume']
     vol_ma5 = df['Volume'].rolling(5, min_periods=1).mean().iloc[-1]
-    
     if strategy_type == "buy":
         is_near_low = row_now['Close'] <= df['Low'].min() * 1.05
         is_volume_spike = last_volume > vol_ma5 * 3
@@ -175,7 +163,6 @@ def generate_signal_low_volume(df: pd.DataFrame, strategy_type: str):
         if is_volume_spike: reasons.append("成交量顯著放大")
         all_ok = is_near_low and is_volume_spike
         return all_ok, reasons
-
     elif strategy_type == "sell":
         is_near_high = row_now['Close'] >= df['High'].max() * 0.95
         is_volume_spike = last_volume > vol_ma5 * 3
@@ -183,7 +170,6 @@ def generate_signal_low_volume(df: pd.DataFrame, strategy_type: str):
         if is_volume_spike: reasons.append("成交量顯著放大")
         all_ok = is_near_high and is_volume_spike
         return all_ok, reasons
-        
     return False, ["策略模式錯誤"]
 
 def evaluate_latest(df: pd.DataFrame, cfg: Config, strategy_type: str, analysis_mode: str):
@@ -243,17 +229,13 @@ def evaluate_latest(df: pd.DataFrame, cfg: Config, strategy_type: str, analysis_
 def simple_forward_test(df: pd.DataFrame, cfg: Config, strategy_type: str, analysis_mode: str):
     if analysis_mode == "low_volume":
         return {"樣本數": 0, "勝率(>0%)": None, f"{cfg.fwd_days}日最佳中位數": None, "平均": None}
-
     df = df.copy()
     results = []
-    
     start_idx = max(cfg.ma_long, cfg.bottom_lookback, cfg.top_lookback, cfg.atr_period) + 2
     if start_idx >= len(df) - cfg.fwd_days:
          return {"樣本數": 0, "勝率(>0%)": 0, f"{cfg.fwd_days}日最佳中位數": 0, "平均": 0}
-
     for i in range(start_idx, len(df) - cfg.fwd_days):
         row_prior, row_now = df.iloc[i-1], df.iloc[i]
-        
         if strategy_type == "buy":
             ok, _ = generate_signal_row_buy(row_prior, row_now, cfg)
             if ok:
@@ -272,10 +254,8 @@ def simple_forward_test(df: pd.DataFrame, cfg: Config, strategy_type: str, analy
                     best = fwd_window.min() 
                     ret = (entry - best) / entry 
                     results.append(ret)
-    
     if not results:
         return {"樣本數": 0, "勝率(>0%)": 0, f"{cfg.fwd_days}日最佳中位數": 0, "平均": 0}
-
     arr = np.array(results)
     return {
         "樣本數": int(arr.size),
@@ -302,13 +282,13 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='MA60'), row=1, col=1)
 
-    # AI 歷史軌跡 (紫色虛線)
+    # AI 歷史軌跡
     if 'AI_Pred' in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df['AI_Pred'], 
                                  line=dict(color='purple', width=2, dash='dot'),
-                                 name='AI 歷史軌跡 (混合模型)'), row=1, col=1)
+                                 name='AI 歷史軌跡 (Model Fit)'), row=1, col=1)
 
-    # AI 未來預測 (紅色虛線)
+    # AI 未來預測
     if forecast_dates and forecast_prices:
         connect_x = [df.index[-1]] + list(forecast_dates)
         connect_y = [df['Close'].iloc[-1]] + list(forecast_prices)
@@ -325,6 +305,43 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
         title_text="股價技術分析圖 (Hybrid Model)",
         xaxis_rangeslider_visible=False,
         hovermode='x unified'
+    )
+    return fig
+
+# ====== 新增：準確度檢測圖表 ======
+def plot_accuracy_chart(df):
+    if not HAS_PLOTLY or 'AI_Pred' not in df.columns:
+        return None
+    
+    # 計算誤差
+    df = df.copy()
+    df['Error_Pct'] = ((df['AI_Pred'] - df['Close']) / df['Close']) * 100
+    
+    # 只取最後 60 天來畫，比較清晰
+    plot_df = df.tail(60)
+    
+    fig = go.Figure()
+    
+    # 畫誤差柱狀圖
+    colors = ['red' if val > 0 else 'green' for val in plot_df['Error_Pct']]
+    fig.add_trace(go.Bar(
+        x=plot_df.index,
+        y=plot_df['Error_Pct'],
+        marker_color=colors,
+        name='誤差 % (預測-實際)'
+    ))
+    
+    # 0軸基準線
+    fig.add_shape(type="line",
+        x0=plot_df.index[0], y0=0, x1=plot_df.index[-1], y1=0,
+        line=dict(color="white", width=1)
+    )
+    
+    fig.update_layout(
+        title="🔎 AI 預測準確度檢測 (誤差百分比)",
+        yaxis_title="預測誤差 (%)",
+        height=300,
+        margin=dict(l=20, r=20, t=40, b=20)
     )
     return fig
 
@@ -372,9 +389,6 @@ def predict_next_5(stock, days, decay_factor):
         return None, None, None, df
 
     # === 混合模型核心 (Hybrid AI) ===
-    # 1. 線性回歸 (Linear Regression) 負責抓大趨勢 (Extrapolation)
-    # 2. 隨機森林 (Random Forest) 負責抓波動細節 (Residuals)
-    
     feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'RSI', 'MACD', 
              'Market_Close', 'Volatility', 'BB_High', 'BB_Low', 'ADX']
     
@@ -396,22 +410,18 @@ def predict_next_5(stock, days, decay_factor):
     model_trend = LinearRegression()
     model_trend.fit(X_train, y_train, sample_weight=weights)
     
-    # 計算趨勢預測與殘差
     trend_pred_train = model_trend.predict(X_train)
     y_train_resid = y_train - trend_pred_train
 
     # --- B. 訓練波動模型 (Random Forest on Residuals) ---
-    # 這裡的 RF 只需要預測「股價偏離趨勢線多少」，不需要預測絕對價格
-    # 這樣就解決了「沒看過高價」的問題
     np.random.seed(42)
     model_rf = RandomForestRegressor(n_estimators=100, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
     model_rf.fit(X_train, y_train_resid, sample_weight=weights)
 
-    # --- C. 驗證混合模型 ---
     if len(X_val) > 0:
         trend_pred_val = model_trend.predict(X_val)
         resid_pred_val = model_rf.predict(X_val)
-        y_pred_val = trend_pred_val + resid_pred_val # 最終預測 = 趨勢 + 波動
+        y_pred_val = trend_pred_val + resid_pred_val
         rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
         st.sidebar.info(f"模型 RMSE: {rmse:.2f} (Hybrid)")
 
@@ -435,13 +445,11 @@ def predict_next_5(stock, days, decay_factor):
         last_row_feats = simulation_df[feats].iloc[-1:].values
         current_input_scaled = scaler.transform(last_row_feats)
         
-        # 混合預測
         pred_trend = model_trend.predict(current_input_scaled)[0]
         pred_resid = model_rf.predict(current_input_scaled)[0]
         base_pred = pred_trend + pred_resid
         
-        # 注入隨機波動 (模擬市場雜訊)
-        noise = np.random.normal(0, current_atr * 0.2) # ATR 20% 雜訊
+        noise = np.random.normal(0, current_atr * 0.2) 
         final_pred = base_pred + noise
         
         predictions[date.date()] = float(final_pred)
@@ -614,6 +622,26 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
                     "漲跌幅": [f"{(v - last_price)/last_price*100:+.2f}%" for v in forecast_vals]
                 })
                 st.table(f_df)
+
+        st.markdown("---")
+        st.subheader("🎯 AI 準確度檢測 (歷史回測)")
+        
+        if 'AI_Pred' in df_result.columns:
+            # 顯示誤差圖表
+            acc_fig = plot_accuracy_chart(df_result)
+            if acc_fig:
+                st.plotly_chart(acc_fig, use_container_width=True)
+            
+            # 計算近期準確度數據
+            recent_df = df_result.tail(30)
+            mae = np.mean(np.abs(recent_df['AI_Pred'] - recent_df['Close']))
+            mape = np.mean(np.abs((recent_df['AI_Pred'] - recent_df['Close']) / recent_df['Close'])) * 100
+            
+            col_acc1, col_acc2 = st.columns(2)
+            col_acc1.metric("近30日平均誤差 (元)", f"${mae:.2f}")
+            col_acc2.metric("近30日平均誤差率 (%)", f"{mape:.2f}%", help="數值越低越準，通常 <3% 為優秀")
+        else:
+            st.info("需等待 AI 運算完成後才能顯示準確度分析。")
 
         st.markdown("---")
         st.subheader("📜 歷史訊號回測 (近一年)")
