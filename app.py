@@ -12,6 +12,15 @@ from ta.trend import ADXIndicator
 from ta.momentum import StochRSIIndicator, StochasticOscillator
 from dataclasses import dataclass
 import io
+
+# 修正：加入錯誤處理，若環境未安裝 plotly 則自動切換至簡易圖表模式
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -243,6 +252,9 @@ def simple_forward_test(df: pd.DataFrame, cfg: Config, strategy_type: str, analy
 
 # ====== 繪圖函數 (使用 Plotly) ======
 def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
+    if not HAS_PLOTLY:
+        return None
+
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                         vertical_spacing=0.05, row_heights=[0.7, 0.3],
                         subplot_titles=('股價走勢與預測', '成交量 & MACD'))
@@ -551,8 +563,18 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
             forecast_dates = list(forecast.keys()) if forecast else []
             forecast_vals = list(forecast.values()) if forecast else []
             
-            fig = plot_stock_data(df_result.tail(120), forecast_dates, forecast_vals)
-            st.plotly_chart(fig, use_container_width=True)
+            if HAS_PLOTLY:
+                fig = plot_stock_data(df_result.tail(120), forecast_dates, forecast_vals)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("⚠️ 系統偵測到未安裝 `plotly` 套件，目前以簡易圖表呈現。若需互動式 K 線圖，請安裝 plotly。")
+                # 簡易備用圖表：顯示收盤價與均線
+                st.caption("股價走勢 (簡易版)")
+                chart_data = df_result.tail(120)[['Close', 'MA20', 'MA60']]
+                st.line_chart(chart_data)
+                
+                st.caption("成交量")
+                st.bar_chart(df_result.tail(120)['Volume'])
             
             # 顯示預測表格
             if forecast:
