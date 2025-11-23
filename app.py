@@ -308,40 +308,64 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
     )
     return fig
 
-# ====== 新增：準確度檢測圖表 ======
+# ====== 新增：準確度檢測圖表 (升級版：折線+準確區) ======
 def plot_accuracy_chart(df):
     if not HAS_PLOTLY or 'AI_Pred' not in df.columns:
         return None
     
-    # 計算誤差
     df = df.copy()
+    # 計算誤差百分比
     df['Error_Pct'] = ((df['AI_Pred'] - df['Close']) / df['Close']) * 100
     
-    # 只取最後 60 天來畫，比較清晰
+    # 取最後 60 天
     plot_df = df.tail(60)
     
     fig = go.Figure()
     
-    # 畫誤差柱狀圖
-    colors = ['red' if val > 0 else 'green' for val in plot_df['Error_Pct']]
-    fig.add_trace(go.Bar(
+    # 1. 誤差趨勢線
+    fig.add_trace(go.Scatter(
         x=plot_df.index,
         y=plot_df['Error_Pct'],
-        marker_color=colors,
-        name='誤差 % (預測-實際)'
+        mode='lines+markers',
+        name='誤差趨勢線 (%)',
+        line=dict(color='#FF4B4B', width=2),
+        marker=dict(size=6, color='#FF4B4B'),
+        hovertemplate='日期: %{x}<br>誤差: %{y:.2f}%<extra></extra>'
     ))
     
-    # 0軸基準線
+    # 2. 0軸基準線 (完美預測線)
     fig.add_shape(type="line",
         x0=plot_df.index[0], y0=0, x1=plot_df.index[-1], y1=0,
-        line=dict(color="white", width=1)
+        line=dict(color="white", width=1, dash="dash")
+    )
+
+    # 3. 綠色準確區間 (±1.5%)
+    fig.add_hrect(
+        y0=-1.5, y1=1.5,
+        fillcolor="green", opacity=0.15,
+        layer="below", line_width=0,
+    )
+    
+    # 加入文字標註
+    fig.add_annotation(
+        x=plot_df.index[0], y=1.6,
+        text="準確區間 (±1.5%)",
+        showarrow=False,
+        yshift=10,
+        font=dict(color="lightgreen")
     )
     
     fig.update_layout(
-        title="🔎 AI 預測準確度檢測 (誤差百分比)",
-        yaxis_title="預測誤差 (%)",
-        height=300,
-        margin=dict(l=20, r=20, t=40, b=20)
+        title="🎯 AI 預測誤差趨勢 (越接近 0 軸越準，跑出綠區代表失準)",
+        yaxis_title="誤差百分比 (%)",
+        yaxis=dict(
+            range=[-5, 5], # 固定範圍，避免極端值破壞比例
+            showgrid=True,
+            zeroline=False
+        ),
+        height=350,
+        margin=dict(l=20, r=20, t=40, b=20),
+        hovermode="x unified"
     )
     return fig
 
