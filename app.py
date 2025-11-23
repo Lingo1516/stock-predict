@@ -7,7 +7,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
 import ta
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+import pytz
 from ta.volatility import BollingerBands
 from ta.trend import ADXIndicator
 from ta.momentum import StochRSIIndicator, StochasticOscillator
@@ -54,24 +55,20 @@ class Config:
 
 CFG = Config()
 
-# ====== 擴充股票代碼對照表 (可自行增加) ======
+# ====== 擴充股票代碼對照表 ======
 stock_name_dict = {
-    # 半導體/電子
     "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2308.TW": "台達電",
     "2303.TW": "聯電", "3711.TW": "日月光投控", "3034.TW": "聯詠", "2379.TW": "瑞昱",
     "3008.TW": "大立光", "2327.TW": "國巨", "2382.TW": "廣達", "3231.TW": "緯創",
     "2357.TW": "華碩", "2356.TW": "英業達", "2301.TW": "光寶科", "2412.TW": "中華電",
     "3045.TW": "台灣大", "4904.TW": "遠傳", "2345.TW": "智邦", "2368.TW": "金像電",
-    # 金融
     "2881.TW": "富邦金", "2882.TW": "國泰金", "2891.TW": "中信金", "2886.TW": "兆豐金",
     "2884.TW": "玉山金", "2892.TW": "第一金", "2885.TW": "元大金", "2880.TW": "華南金",
     "2883.TW": "開發金", "2890.TW": "永豐金",
-    # 傳產/航運
     "2002.TW": "中鋼", "1301.TW": "台塑", "1303.TW": "南亞", "1326.TW": "台化",
     "6505.TW": "台塑化", "2603.TW": "長榮", "2609.TW": "陽明", "2615.TW": "萬海",
     "2618.TW": "長榮航", "2610.TW": "華航", "1101.TW": "台泥", "1102.TW": "亞泥",
     "1216.TW": "統一", "2912.TW": "統一超",
-    # AI 相關
     "2376.TW": "技嘉", "2377.TW": "微星", "6669.TW": "緯穎", "3035.TW": "智原",
     "3443.TW": "創意", "3661.TW": "世芯-KY", "3017.TW": "奇鋐", "3324.TW": "雙鴻"
 }
@@ -216,13 +213,13 @@ def evaluate_latest(df: pd.DataFrame, cfg: Config, strategy_type: str, analysis_
         signal, reasons = generate_signal_row_buy(row_prior, row_now, cfg)
         stop_level = row_now['Close'] - 2.5 * atr
         position_risk = row_now['Close'] - stop_level
-        action_text = "買進"
+        action_text = "多方(買進)模式"
         risk_text = "建議停損"
     else: 
         signal, reasons = generate_signal_row_sell(row_prior, row_now, cfg)
         stop_level = row_now['Close'] + 2.5 * atr
         position_risk = stop_level - row_now['Close']
-        action_text = "放空"
+        action_text = "空方(放空)模式"
         risk_text = "建議停損"
 
     position_size = 0
@@ -404,36 +401,28 @@ def predict_next_5(stock, days, decay_factor):
     if len(df) < 30:
         return None, None, None, df
 
-    # === 混合模型核心 (智慧權重版) ===
     feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'RSI', 'MACD', 
              'Market_Close', 'Volatility', 'BB_High', 'BB_Low', 'ADX']
     
     X = df[feats].values
     y = df['Close'].values
     
-    split_idx = int(len(X) * 0.85)
-    X_train_raw, X_val_raw = X[:split_idx], X[split_idx:]
-    y_train, y_val = y[:split_idx], y[split_idx:]
-    
     scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train_raw)
-    X_val = scaler.transform(X_val_raw)
+    X_train = scaler.fit_transform(X)
+    y_train = y
     
     weights = np.exp(-decay_factor * np.arange(len(X_train))[::-1])
     weights = weights / np.sum(weights)
 
-    # 1. 趨勢模型 (Linear)
     model_trend = LinearRegression()
     model_trend.fit(X_train, y_train, sample_weight=weights)
     trend_pred_train = model_trend.predict(X_train)
     y_train_resid = y_train - trend_pred_train
 
-    # 2. 波動模型 (RF)
     np.random.seed(42)
     model_rf = RandomForestRegressor(n_estimators=100, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
     model_rf.fit(X_train, y_train_resid, sample_weight=weights)
 
-    # === 計算動態權重 ===
     ma20_vals = df['MA20'].values
     ma60_vals = df['MA60'].values
     adx_vals = df['ADX'].values
@@ -446,7 +435,6 @@ def predict_next_5(stock, days, decay_factor):
     for i in range(len(X)):
         t_pred = trend_all[i]
         r_pred = resid_all[i]
-        
         curr_adx = adx_vals[i]
         
         if curr_adx < 20:
@@ -460,13 +448,6 @@ def predict_next_5(stock, days, decay_factor):
 
     df['AI_Pred'] = history_preds
 
-    if len(X_val) > 0:
-        val_start_idx = len(X_train)
-        val_preds = history_preds[val_start_idx:]
-        rmse = np.sqrt(mean_squared_error(y_val, val_preds))
-        st.sidebar.info(f"模型 RMSE: {rmse:.2f} (Stabilized)")
-
-    # === 未來預測 ===
     simulation_df = df.tail(100).copy()
     future_dates = pd.bdate_range(start=df.index[-1], periods=6)[1:]
     
@@ -474,6 +455,8 @@ def predict_next_5(stock, days, decay_factor):
     predicted_prices = []
     last_close_real = y[-1]
     
+    current_atr = simulation_df['ATR'].iloc[-1]
+
     for date in future_dates:
         last_row_feats = simulation_df[feats].iloc[-1:].values
         current_input_scaled = scaler.transform(last_row_feats)
@@ -555,6 +538,12 @@ st.markdown("""
         padding: 15px;
         margin: 10px 0;
     }
+    .suggestion-box {
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        margin-bottom: 20px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -578,7 +567,6 @@ with st.sidebar:
                 ["請選擇..."] + st.session_state.recent_stocks
             )
             if selected_history != "請選擇...":
-                # Extract code from "2330.TW 台積電"
                 default_code = selected_history.split(" ")[0].replace(".TW", "")
             else:
                 default_code = "2330"
@@ -599,9 +587,6 @@ with st.sidebar:
     else:
         st.info("手動模式不支援 AI 預測，僅提供技術指標分析")
 
-# Call update function when history is selected to update session state if needed
-# But simplified logic above works by setting 'value' of text_input
-
 if st.button("🚀 開始分析", type="primary", use_container_width=True):
     
     df_result = pd.DataFrame()
@@ -613,13 +598,10 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
         full_code = code.strip().upper()
         if full_code.isdigit(): full_code += ".TW"
         
-        # Get Name for Title
         stock_name = stock_name_dict.get(full_code, "未知名稱")
         if stock_name == "未知名稱":
-             # Try to fetch info if not in dict (simplified)
              try:
                  ticker = yf.Ticker(full_code)
-                 # stock_name = ticker.info.get('longName', full_code) # This is slow, use dict for now
                  pass
              except:
                  pass
@@ -628,11 +610,9 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
             last_price, forecast, preds, df_result = predict_next_5(full_code, days, decay_factor)
             
             if df_result is not None and not df_result.empty:
-                # Update History
                 history_item = f"{full_code} {stock_name}"
                 if history_item not in st.session_state.recent_stocks:
                     st.session_state.recent_stocks.insert(0, history_item)
-                    # Keep only last 10
                     if len(st.session_state.recent_stocks) > 10:
                         st.session_state.recent_stocks.pop()
                 
@@ -657,27 +637,57 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
                 st.stop()
 
     if not df_result.empty:
+        # ====== 即時操盤建議專區 ======
+        tz_tw = pytz.timezone('Asia/Taipei')
+        now_tw = datetime.now(tz_tw)
+        market_open_time = time(9, 0)
+        market_close_time = time(13, 30)
+        
+        is_market_open = market_open_time <= now_tw.time() <= market_close_time
+        # 如果是週末，也算收盤
+        if now_tw.weekday() >= 5:
+            is_market_open = False
+            
+        status_text = "🌞 開盤中 (即時數據)" if is_market_open else "🌙 已收盤 (使用昨收數據)"
+        
+        # 決定紅綠燈
+        strat_type_key = "buy" if strategy_type == "買進策略" else "sell"
+        analysis_mode = "low_volume" if is_low_volume else "normal"
+        summary, _ = evaluate_latest(df_result, CFG, strat_type_key, analysis_mode)
+        
+        signal_color = "gray"
+        signal_emoji = "🟡"
+        signal_text = "觀望 (WAIT)"
+        
+        if summary["是否符合訊號"]:
+            if summary["動作"].startswith("多方"):
+                signal_color = "#d4edda" # Light Green
+                signal_emoji = "🟢"
+                signal_text = "買進訊號 (BUY)"
+            else:
+                signal_color = "#f8d7da" # Light Red
+                signal_emoji = "🔴"
+                signal_text = "放空訊號 (SELL)"
+        else:
+            signal_color = "#fff3cd" # Light Yellow
+            signal_emoji = "🟡"
+            signal_text = "觀望 / 空手 (WAIT)"
+
+        st.markdown(f"""
+        <div style="background-color: {signal_color}; padding: 20px; border-radius: 15px; text-align: center; border: 2px solid #ccc;">
+            <h4 style="margin:0; color: #555;">{status_text} | 資料時間: {summary['日期']}</h4>
+            <h1 style="font-size: 48px; margin: 10px 0;">{signal_emoji} {signal_text}</h1>
+            <p style="font-size: 18px;"><b>檢測策略模式:</b> {summary['動作']} | <b>收盤價:</b> {summary['收盤']}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        # ============================
+
         col1, col2 = st.columns([1, 2])
         
         with col1:
-            st.markdown("### 📊 訊號儀表板")
+            st.markdown("### 📊 詳細訊號數據")
             
-            st.metric("📉 基準收盤價 (Last Close)", f"${last_price:.2f}", help="這是 AI 預測的起點價格，即最近一個交易日的收盤價")
-            
-            strat_type_key = "buy" if strategy_type == "買進策略" else "sell"
-            analysis_mode = "low_volume" if is_low_volume else "normal"
-            
-            summary, _ = evaluate_latest(df_result, CFG, strat_type_key, analysis_mode)
-            
-            bg_color = "#d4edda" if summary["是否符合訊號"] else "#f8d7da"
-            st.markdown(f"""
-            <div style="background-color: {bg_color}; padding: 15px; border-radius: 10px;">
-                <h3 style="margin:0;">訊號判定: {'✅ 符合' if summary["是否符合訊號"] else '❌ 觀望'}</h3>
-                <p><strong>動作:</strong> {summary['動作']}</p>
-                <p><strong>理由:</strong> {summary['理由']}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
+            st.write(f"**理由**: {summary['理由']}")
             st.markdown("#### 🛡️ 風險控管建議")
             st.write(f"建議停損價: **{summary['建議停損']}**")
             st.write(f"當前 ATR波動: **{summary['估計ATR']}**")
@@ -697,14 +707,10 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
                 fig = plot_stock_data(df_result.tail(120), forecast_dates, forecast_vals)
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                st.warning(f"⚠️ 系統偵測到未安裝 `plotly` 套件。錯誤原因: {PLOTLY_ERROR}")
-                st.code(f"目前 Python 執行路徑: {sys.executable}", language='bash')
-                st.info("請確認您使用 `pip install plotly` 安裝套件的環境，與上述 Python 路徑一致。")
-                
+                st.warning(f"⚠️ 系統偵測到未安裝 `plotly` 套件。")
                 st.caption("股價走勢 (簡易版)")
                 chart_data = df_result.tail(120)[['Close', 'MA20', 'MA60']]
                 st.line_chart(chart_data)
-                st.bar_chart(df_result.tail(120)['Volume'])
             
             if forecast:
                 st.markdown("#### 未來 5 日價格預測")
