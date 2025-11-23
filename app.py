@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
 import ta
@@ -82,9 +83,9 @@ def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     
     df['ADX'] = ADXIndicator(high, low, close, window=14).adx()
     
-    # 滯後特徵
+    # 滯後特徵 (Lag Features) - 增加更多 Lag 以捕捉慣性
     df['Prev_Close'] = close.shift(1)
-    for i in range(1, 4):
+    for i in range(1, 6): # 增加到 5 天
         df[f'Prev_Close_Lag{i}'] = close.shift(i)
         
     df['Volatility'] = close.rolling(10).std()
@@ -117,25 +118,20 @@ def calc_atr(df: pd.DataFrame, period=14):
 # ====== 訊號生成邏輯 ======
 def generate_signal_row_buy(row_prior, row_now, cfg: Config):
     reasons = []
-    # 1) 底部條件
     bottom_built = (row_now['Close'] <= row_now['RecentLow'] * 1.08) and (row_now['Close'] > (row_now['PriorHigh'] * 0.8))
     if bottom_built: reasons.append("接近近期低點後回升")
 
-    # 2) KD 黃金交叉且脫離超賣區
     kd_cross_up = (row_prior['K'] < row_prior['D']) and (row_now['K'] > row_now['D'])
     kd_above_threshold = row_now['K'] > cfg.kd_threshold
     kd_ok = kd_cross_up and kd_above_threshold
     if kd_ok: reasons.append(f"KD黃金交叉且K>{cfg.kd_threshold:.0f}")
 
-    # 3) MACD 柱轉正且放大
     macd_hist_up = (row_now['MACD'] > 0) and (row_now['MACD'] > row_prior['MACD'])
     if macd_hist_up: reasons.append("MACD柱轉正且走揚")
 
-    # 4) 趨勢濾網
     trend_ok = (row_now['MA_S'] > row_now['MA_L']) and (row_now['MA_S_SLOPE'] > 0)
     if trend_ok: reasons.append("多頭趨勢濾網通過")
 
-    # 5) 量能濾網
     volume_ok = row_now['Volume'] >= row_now['VOL_MA']
     if volume_ok: reasons.append("量能不弱於均量")
 
@@ -144,25 +140,20 @@ def generate_signal_row_buy(row_prior, row_now, cfg: Config):
 
 def generate_signal_row_sell(row_prior, row_now, cfg: Config):
     reasons = []
-    # 1) 頭部條件
     top_built = (row_now['Close'] >= row_now['RecentHigh'] * 0.92) and (row_now['Close'] < (row_now['PriorLow'] * 1.2))
     if top_built: reasons.append("接近近期高點後回落")
 
-    # 2) KD 死亡交叉且脫離超買區
     kd_cross_down = (row_prior['K'] > row_prior['D']) and (row_now['K'] < row_now['D'])
     kd_below_threshold = row_now['K'] < cfg.kd_threshold_sell
     kd_ok_sell = kd_cross_down and kd_below_threshold
     if kd_ok_sell: reasons.append(f"KD死亡交叉且K<{cfg.kd_threshold_sell:.0f}")
 
-    # 3) MACD 柱轉負且縮小
     macd_hist_down = (row_now['MACD'] < 0) and (row_now['MACD'] < row_prior['MACD'])
     if macd_hist_down: reasons.append("MACD柱轉負且走弱")
 
-    # 4) 趨勢濾網
     trend_ok_sell = (row_now['MA_S'] < row_now['MA_L']) and (row_now['MA_S_SLOPE'] < 0)
     if trend_ok_sell: reasons.append("空頭趨勢濾網通過")
 
-    # 5) 量能濾網
     volume_ok_sell = row_now['Volume'] >= row_now['VOL_MA']
     if volume_ok_sell: reasons.append("量能不弱於均量")
 
@@ -301,33 +292,37 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
                         vertical_spacing=0.05, row_heights=[0.7, 0.3],
                         subplot_titles=('股價走勢與預測', '成交量 & MACD'))
 
+    # K線圖
     fig.add_trace(go.Candlestick(x=df.index,
                                  open=df['Open'], high=df['High'],
                                  low=df['Low'], close=df['Close'],
                                  name='K線'), row=1, col=1)
     
+    # 均線
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='MA60'), row=1, col=1)
 
-    # 新增：AI 歷史軌跡 (紫色虛線)
+    # AI 歷史軌跡 (紫色虛線)
     if 'AI_Pred' in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df['AI_Pred'], 
-                                 line=dict(color='purple', width=1.5, dash='dot'),
-                                 name='AI 歷史軌跡 (Model Fit)'), row=1, col=1)
+                                 line=dict(color='purple', width=2, dash='dot'),
+                                 name='AI 歷史軌跡 (混合模型)'), row=1, col=1)
 
+    # AI 未來預測 (紅色虛線)
     if forecast_dates and forecast_prices:
         connect_x = [df.index[-1]] + list(forecast_dates)
         connect_y = [df['Close'].iloc[-1]] + list(forecast_prices)
         fig.add_trace(go.Scatter(x=connect_x, y=connect_y, 
-                                 line=dict(color='red', width=2, dash='dash'), 
+                                 line=dict(color='red', width=3, dash='dash'), 
                                  name='AI 未來預測'), row=1, col=1)
 
+    # 成交量
     colors = ['red' if row['Open'] - row['Close'] >= 0 else 'green' for index, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
 
     fig.update_layout(
         height=600,
-        title_text="股價技術分析圖",
+        title_text="股價技術分析圖 (Hybrid Model)",
         xaxis_rangeslider_visible=False,
         hovermode='x unified'
     )
@@ -376,7 +371,10 @@ def predict_next_5(stock, days, decay_factor):
     if len(df) < 30:
         return None, None, None, df
 
-    # === 機器學習模型 ===
+    # === 混合模型核心 (Hybrid AI) ===
+    # 1. 線性回歸 (Linear Regression) 負責抓大趨勢 (Extrapolation)
+    # 2. 隨機森林 (Random Forest) 負責抓波動細節 (Residuals)
+    
     feats = ['Prev_Close', 'MA5', 'MA10', 'MA20', 'RSI', 'MACD', 
              'Market_Close', 'Volatility', 'BB_High', 'BB_Low', 'ADX']
     
@@ -394,22 +392,36 @@ def predict_next_5(stock, days, decay_factor):
     weights = np.exp(-decay_factor * np.arange(len(X_train))[::-1])
     weights = weights / np.sum(weights)
 
-    np.random.seed(42)
-    model = RandomForestRegressor(n_estimators=100, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
-    model.fit(X_train, y_train, sample_weight=weights)
-
-    if len(X_val) > 0:
-        y_pred_val = model.predict(X_val)
-        rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
-        st.sidebar.info(f"模型 RMSE: {rmse:.2f}")
-
-    # === 新增功能：計算歷史預測軌跡 (Backtest Line) ===
-    # 用訓練好的模型，去跑一遍所有的歷史數據，畫出「AI 眼中的合理價格」
-    all_inputs_scaled = scaler.transform(X)
-    df['AI_Pred'] = model.predict(all_inputs_scaled)
-
-    # === 極致改進的遞迴預測 (Dynamic Indicator Re-calculation + Stochastic Injection) ===
+    # --- A. 訓練趨勢模型 (Linear Regression) ---
+    model_trend = LinearRegression()
+    model_trend.fit(X_train, y_train, sample_weight=weights)
     
+    # 計算趨勢預測與殘差
+    trend_pred_train = model_trend.predict(X_train)
+    y_train_resid = y_train - trend_pred_train
+
+    # --- B. 訓練波動模型 (Random Forest on Residuals) ---
+    # 這裡的 RF 只需要預測「股價偏離趨勢線多少」，不需要預測絕對價格
+    # 這樣就解決了「沒看過高價」的問題
+    np.random.seed(42)
+    model_rf = RandomForestRegressor(n_estimators=100, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
+    model_rf.fit(X_train, y_train_resid, sample_weight=weights)
+
+    # --- C. 驗證混合模型 ---
+    if len(X_val) > 0:
+        trend_pred_val = model_trend.predict(X_val)
+        resid_pred_val = model_rf.predict(X_val)
+        y_pred_val = trend_pred_val + resid_pred_val # 最終預測 = 趨勢 + 波動
+        rmse = np.sqrt(mean_squared_error(y_val, y_pred_val))
+        st.sidebar.info(f"模型 RMSE: {rmse:.2f} (Hybrid)")
+
+    # === 計算歷史軌跡 (Backtest Line) ===
+    all_inputs_scaled = scaler.transform(X)
+    trend_all = model_trend.predict(all_inputs_scaled)
+    resid_all = model_rf.predict(all_inputs_scaled)
+    df['AI_Pred'] = trend_all + resid_all
+
+    # === 未來預測 ===
     simulation_df = df.tail(100).copy()
     future_dates = pd.bdate_range(start=df.index[-1], periods=6)[1:]
     
@@ -423,9 +435,13 @@ def predict_next_5(stock, days, decay_factor):
         last_row_feats = simulation_df[feats].iloc[-1:].values
         current_input_scaled = scaler.transform(last_row_feats)
         
-        base_pred = model.predict(current_input_scaled)[0]
+        # 混合預測
+        pred_trend = model_trend.predict(current_input_scaled)[0]
+        pred_resid = model_rf.predict(current_input_scaled)[0]
+        base_pred = pred_trend + pred_resid
         
-        noise = np.random.normal(0, current_atr * 0.15)
+        # 注入隨機波動 (模擬市場雜訊)
+        noise = np.random.normal(0, current_atr * 0.2) # ATR 20% 雜訊
         final_pred = base_pred + noise
         
         predictions[date.date()] = float(final_pred)
