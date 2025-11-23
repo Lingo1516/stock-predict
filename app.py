@@ -567,6 +567,7 @@ with st.sidebar:
                 ["請選擇..."] + st.session_state.recent_stocks
             )
             if selected_history != "請選擇...":
+                # Extract code from "2330.TW 台積電"
                 default_code = selected_history.split(" ")[0].replace(".TW", "")
             else:
                 default_code = "2330"
@@ -587,6 +588,9 @@ with st.sidebar:
     else:
         st.info("手動模式不支援 AI 預測，僅提供技術指標分析")
 
+# Call update function when history is selected to update session state if needed
+# But simplified logic above works by setting 'value' of text_input
+
 if st.button("🚀 開始分析", type="primary", use_container_width=True):
     
     df_result = pd.DataFrame()
@@ -598,10 +602,13 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
         full_code = code.strip().upper()
         if full_code.isdigit(): full_code += ".TW"
         
+        # Get Name for Title
         stock_name = stock_name_dict.get(full_code, "未知名稱")
         if stock_name == "未知名稱":
+             # Try to fetch info if not in dict (simplified)
              try:
                  ticker = yf.Ticker(full_code)
+                 # stock_name = ticker.info.get('longName', full_code) # This is slow, use dict for now
                  pass
              except:
                  pass
@@ -610,9 +617,11 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
             last_price, forecast, preds, df_result = predict_next_5(full_code, days, decay_factor)
             
             if df_result is not None and not df_result.empty:
+                # Update History
                 history_item = f"{full_code} {stock_name}"
                 if history_item not in st.session_state.recent_stocks:
                     st.session_state.recent_stocks.insert(0, history_item)
+                    # Keep only last 10
                     if len(st.session_state.recent_stocks) > 10:
                         st.session_state.recent_stocks.pop()
                 
@@ -655,11 +664,20 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
         analysis_mode = "low_volume" if is_low_volume else "normal"
         summary, _ = evaluate_latest(df_result, CFG, strat_type_key, analysis_mode)
         
+        # Calculate AI Trend for UI logic
+        ai_trend_pct = 0
+        if preds:
+            price_values = list(preds.values())
+            avg_pred = np.mean(price_values)
+            ai_trend_pct = ((avg_pred - last_price) / last_price) * 100
+        
         signal_color = "gray"
         signal_emoji = "🟡"
         signal_text = "觀望 (WAIT)"
+        ai_trend_str = ""
         
         if summary["是否符合訊號"]:
+            # 訊號符合，直接綠燈/紅燈
             if summary["動作"].startswith("多方"):
                 signal_color = "#d4edda" # Light Green
                 signal_emoji = "🟢"
@@ -669,15 +687,20 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
                 signal_emoji = "🔴"
                 signal_text = "放空訊號 (SELL)"
         else:
+            # 訊號不符合 (Wait)，但顯示 AI 趨勢作為參考
             signal_color = "#fff3cd" # Light Yellow
             signal_emoji = "🟡"
-            signal_text = "觀望 / 空手 (WAIT)"
+            
+            # 根據 AI 判斷趨勢
+            trend_direction = "偏多" if ai_trend_pct > 0 else "偏空"
+            ai_trend_str = f" | <b>AI 趨勢:</b> {trend_direction} (預期 {ai_trend_pct:+.1f}%)，但技術面尚未確認"
+            signal_text = f"觀望 (WAIT) - 趨勢{trend_direction}，等待買點"
 
         st.markdown(f"""
-        <div style="background-color: {signal_color}; padding: 20px; border-radius: 15px; text-align: center; border: 2px solid #ccc;">
+        <div style="background-color: {signal_color}; padding: 20px; border-radius: 15px; text-align: center; border: 2px solid #ccc; color: #333;">
             <h4 style="margin:0; color: #555;">{status_text} | 資料時間: {summary['日期']}</h4>
-            <h1 style="font-size: 48px; margin: 10px 0;">{signal_emoji} {signal_text}</h1>
-            <p style="font-size: 18px;"><b>檢測策略模式:</b> {summary['動作']} | <b>收盤價:</b> {summary['收盤']}</p>
+            <h1 style="font-size: 36px; margin: 10px 0;">{signal_emoji} {signal_text}</h1>
+            <p style="font-size: 18px;"><b>檢測策略模式:</b> {summary['動作']} | <b>收盤價:</b> {summary['收盤']}{ai_trend_str}</p>
         </div>
         """, unsafe_allow_html=True)
         # ============================
@@ -686,14 +709,15 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
         
         with col1:
             st.markdown("### 📊 詳細訊號數據")
+            st.metric("📉 基準收盤價 (Last Close)", f"${last_price:.2f}", help="這是 AI 預測的起點價格，即最近一個交易日的收盤價")
             
-            st.write(f"**理由**: {summary['理由']}")
+            st.write(f"**技術面訊號**: {summary['理由']}")
             st.markdown("#### 🛡️ 風險控管建議")
             st.write(f"建議停損價: **{summary['建議停損']}**")
             st.write(f"當前 ATR波動: **{summary['估計ATR']}**")
             
             if forecast:
-                st.markdown("#### 🤖 AI 趨勢預測")
+                st.markdown("#### 🤖 AI 趨勢方向 (AI Trend)")
                 advice = get_trade_advice(last_price, preds)
                 st.info(f"AI 建議: **{advice}**")
 
