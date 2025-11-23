@@ -671,6 +671,10 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
         
         with col1:
             st.markdown("### 📊 訊號儀表板")
+            
+            # NEW CODE HERE
+            st.metric("📉 基準收盤價 (Last Close)", f"${last_price:.2f}", help="這是 AI 預測的起點價格，即最近一個交易日的收盤價")
+            
             strat_type_key = "buy" if strategy_type == "買進策略" else "sell"
             analysis_mode = "low_volume" if is_low_volume else "normal"
             
