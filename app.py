@@ -54,6 +54,28 @@ class Config:
 
 CFG = Config()
 
+# ====== 擴充股票代碼對照表 (可自行增加) ======
+stock_name_dict = {
+    # 半導體/電子
+    "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2308.TW": "台達電",
+    "2303.TW": "聯電", "3711.TW": "日月光投控", "3034.TW": "聯詠", "2379.TW": "瑞昱",
+    "3008.TW": "大立光", "2327.TW": "國巨", "2382.TW": "廣達", "3231.TW": "緯創",
+    "2357.TW": "華碩", "2356.TW": "英業達", "2301.TW": "光寶科", "2412.TW": "中華電",
+    "3045.TW": "台灣大", "4904.TW": "遠傳", "2345.TW": "智邦", "2368.TW": "金像電",
+    # 金融
+    "2881.TW": "富邦金", "2882.TW": "國泰金", "2891.TW": "中信金", "2886.TW": "兆豐金",
+    "2884.TW": "玉山金", "2892.TW": "第一金", "2885.TW": "元大金", "2880.TW": "華南金",
+    "2883.TW": "開發金", "2890.TW": "永豐金",
+    # 傳產/航運
+    "2002.TW": "中鋼", "1301.TW": "台塑", "1303.TW": "南亞", "1326.TW": "台化",
+    "6505.TW": "台塑化", "2603.TW": "長榮", "2609.TW": "陽明", "2615.TW": "萬海",
+    "2618.TW": "長榮航", "2610.TW": "華航", "1101.TW": "台泥", "1102.TW": "亞泥",
+    "1216.TW": "統一", "2912.TW": "統一超",
+    # AI 相關
+    "2376.TW": "技嘉", "2377.TW": "微星", "6669.TW": "緯穎", "3035.TW": "智原",
+    "3443.TW": "創意", "3661.TW": "世芯-KY", "3017.TW": "奇鋐", "3324.TW": "雙鴻"
+}
+
 # ====== 核心功能：技術指標計算 ======
 def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     df = df.copy()
@@ -61,7 +83,6 @@ def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     high = df['High']
     low = df['Low']
     
-    # 基礎均線
     df['MA5'] = close.rolling(5).mean()
     df['MA10'] = close.rolling(10).mean()
     df['MA20'] = close.rolling(20).mean()
@@ -70,9 +91,7 @@ def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     df['MA_L'] = df['MA60']
     df['MA_S_SLOPE'] = df['MA_S'] - df['MA_S'].shift(5)
 
-    # 進階指標
     df['RSI'] = ta.momentum.RSIIndicator(close, window=14).rsi()
-    
     macd = ta.trend.MACD(close)
     df['MACD'] = macd.macd_diff()
     df['MACD_SIGNAL'] = macd.macd_signal()
@@ -83,23 +102,19 @@ def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     
     df['ADX'] = ADXIndicator(high, low, close, window=14).adx()
     
-    # 滯後特徵
     df['Prev_Close'] = close.shift(1)
     for i in range(1, 6): 
         df[f'Prev_Close_Lag{i}'] = close.shift(i)
         
     df['Volatility'] = close.rolling(10).std()
     
-    # KD
     stoch = StochasticOscillator(high=high, low=low, close=close, window=cfg.stoch_k, smooth_window=cfg.stoch_smooth)
     df['K'] = stoch.stoch()
     df['D'] = stoch.stoch_signal()
     
-    # ATR
     atr_indicator = ta.volatility.AverageTrueRange(high, low, close, window=cfg.atr_period)
     df['ATR'] = atr_indicator.average_true_range()
     
-    # 策略用特徵
     df['RecentLow'] = close.rolling(cfg.bottom_lookback).min()
     df['PriorHigh'] = close.shift(1).rolling(cfg.higher_high_lookback).max()
     df['RecentHigh'] = close.rolling(cfg.top_lookback).max()
@@ -115,7 +130,7 @@ def calc_kd(df: pd.DataFrame, k=9, d=3, smooth=3):
 def calc_atr(df: pd.DataFrame, period=14):
     return df['ATR']
 
-# ====== 訊號生成邏輯 (維持不變) ======
+# ====== 訊號生成邏輯 ======
 def generate_signal_row_buy(row_prior, row_now, cfg: Config):
     reasons = []
     bottom_built = (row_now['Close'] <= row_now['RecentLow'] * 1.08) and (row_now['Close'] > (row_now['PriorHigh'] * 0.8))
@@ -272,23 +287,19 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
                         vertical_spacing=0.05, row_heights=[0.7, 0.3],
                         subplot_titles=('股價走勢與預測', '成交量 & MACD'))
 
-    # K線圖
     fig.add_trace(go.Candlestick(x=df.index,
                                  open=df['Open'], high=df['High'],
                                  low=df['Low'], close=df['Close'],
                                  name='K線'), row=1, col=1)
     
-    # 均線
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='orange', width=1), name='MA20'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='blue', width=1), name='MA60'), row=1, col=1)
 
-    # AI 歷史軌跡
     if 'AI_Pred' in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df['AI_Pred'], 
                                  line=dict(color='purple', width=2, dash='dot'),
                                  name='AI 歷史軌跡 (穩定混合)'), row=1, col=1)
 
-    # AI 未來預測
     if forecast_dates and forecast_prices:
         connect_x = [df.index[-1]] + list(forecast_dates)
         connect_y = [df['Close'].iloc[-1]] + list(forecast_prices)
@@ -296,7 +307,6 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
                                  line=dict(color='red', width=3, dash='dash'), 
                                  name='AI 未來預測'), row=1, col=1)
 
-    # 成交量
     colors = ['red' if row['Open'] - row['Close'] >= 0 else 'green' for index, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='Volume'), row=2, col=1)
 
@@ -308,7 +318,6 @@ def plot_stock_data(df, forecast_dates=None, forecast_prices=None):
     )
     return fig
 
-# ====== 新增：準確度檢測圖表 ======
 def plot_accuracy_chart(df):
     if not HAS_PLOTLY or 'AI_Pred' not in df.columns:
         return None
@@ -357,11 +366,6 @@ def plot_accuracy_chart(df):
         hovermode="x unified"
     )
     return fig
-
-stock_name_dict = {
-    "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2308.TW": "台達電",
-    "2303.TW": "聯電", "2881.TW": "富邦金", "2412.TW": "中華電", "1301.TW": "台塑"
-}
 
 @st.cache_data(ttl=3600)
 def predict_next_5(stock, days, decay_factor):
@@ -429,74 +433,26 @@ def predict_next_5(stock, days, decay_factor):
     model_rf = RandomForestRegressor(n_estimators=100, max_depth=10, min_samples_split=5, random_state=42, n_jobs=-1)
     model_rf.fit(X_train, y_train_resid, sample_weight=weights)
 
-    # === 計算動態權重 (Determine Market Regime) ===
-    # 用於歷史回測的權重計算
+    # === 計算動態權重 ===
     ma20_vals = df['MA20'].values
     ma60_vals = df['MA60'].values
     adx_vals = df['ADX'].values
     
-    # 如果 MA20 > MA60 (多頭) 且 ADX > 25 (有趨勢) -> 趨勢權重高
-    # 如果 MA20 < MA60 (空頭/盤整) -> 波動權重高 (均值回歸)
-    
     all_inputs_scaled = scaler.transform(X)
     trend_all = model_trend.predict(all_inputs_scaled)
     resid_all = model_rf.predict(all_inputs_scaled)
-    
-    final_preds = []
-    for i in range(len(trend_all)):
-        # 簡單的狀態判斷
-        is_bullish = ma20_vals[i] > ma60_vals[i]
-        is_trending = adx_vals[i] > 25
-        
-        if is_bullish and is_trending:
-            # 強勢多頭：相信趨勢
-            w_trend = 0.8
-            w_resid = 0.2
-        elif not is_bullish:
-            # 空頭或弱勢：相信區間波動 (隨機森林比較保守)
-            w_trend = 0.2
-            w_resid = 0.8
-        else:
-            # 盤整：各半
-            w_trend = 0.5
-            w_resid = 0.5
-            
-        final_preds.append(trend_all[i] * w_trend + (trend_all[i] + resid_all[i]) * w_resid) # 注意：resid是加在trend上的，這裡簡化邏輯
-        # 修正公式：
-        # 趨勢模型預測 = trend_all[i]
-        # 波動模型預測 (隱含均值回歸) = trend_all[i] + resid_all[i]
-        # 混合 = (trend_all[i] * w_trend) + ((trend_all[i] + resid_all[i]) * w_resid)
-        
-        # 為了更精確，這裡直接用加權
-        # 若 w_trend 高，代表我們更看重線性延伸
-        # 若 w_resid 高，代表我們更看重 RF 的細節修正
-        pred_val = trend_all[i] + (resid_all[i] * w_resid) # 讓線性回歸當基底，RF 當修正，但修正幅度受控
-        final_preds.append(pred_val)
-
-    # 重新計算一次更嚴謹的歷史軌跡，這次不再用簡單相加，而是用上述邏輯
-    # 上面的 loop 邏輯有點怪，讓我們統一用更直觀的寫法：
-    # 最終預測 = 線性趨勢 + (隨機森林殘差 * 信心係數)
-    # 信心係數：在盤整時高 (相信回歸)，在趨勢時低 (相信突破... 等等，應該反過來？)
-    # 其實：RF 擅長區間，LR 擅長趨勢。
-    # 所以：
-    # 趨勢盤 -> 讓 LR 主導 (Residual 權重低，不要亂拉回)
-    # 盤整盤 -> 讓 RF 主導 (Residual 權重高，捕捉上下刷)
     
     history_preds = []
     for i in range(len(X)):
         t_pred = trend_all[i]
         r_pred = resid_all[i]
         
-        # 判斷當下狀態
         curr_adx = adx_vals[i]
         
-        # 動態調整殘差權重
-        # ADX 低 (盤整) -> 完全接受 RF 的修正 (weight = 1.0)
-        # ADX 高 (趨勢) -> 減少 RF 的修正，讓 LR 發揮 (weight = 0.5)
         if curr_adx < 20:
-            resid_weight = 1.2 # 加強波動捕捉
+            resid_weight = 1.2 
         elif curr_adx > 40:
-            resid_weight = 0.5 # 降低波動干擾，順勢
+            resid_weight = 0.5 
         else:
             resid_weight = 0.9
             
@@ -505,13 +461,12 @@ def predict_next_5(stock, days, decay_factor):
     df['AI_Pred'] = history_preds
 
     if len(X_val) > 0:
-        # 簡單計算一下驗證集誤差
         val_start_idx = len(X_train)
         val_preds = history_preds[val_start_idx:]
         rmse = np.sqrt(mean_squared_error(y_val, val_preds))
         st.sidebar.info(f"模型 RMSE: {rmse:.2f} (Stabilized)")
 
-    # === 未來預測 (移除隨機雜訊，改用動態指標重算 + 阻尼) ===
+    # === 未來預測 ===
     simulation_df = df.tail(100).copy()
     future_dates = pd.bdate_range(start=df.index[-1], periods=6)[1:]
     
@@ -526,10 +481,8 @@ def predict_next_5(stock, days, decay_factor):
         pred_trend = model_trend.predict(current_input_scaled)[0]
         pred_resid = model_rf.predict(current_input_scaled)[0]
         
-        # 取得當前狀態 (用於預測)
         curr_adx = simulation_df['ADX'].iloc[-1]
         
-        # 決定權重
         if curr_adx < 20:
             w_resid = 1.2
         elif curr_adx > 40:
@@ -539,9 +492,6 @@ def predict_next_5(stock, days, decay_factor):
             
         final_pred = pred_trend + (pred_resid * w_resid)
         
-        # === 阻尼機制 (Damping) ===
-        # 防止預測值偏離太遠 (例如連續噴出)
-        # 如果預測值 > MA20 + 3*ATR (極端乖離)，強制拉回
         curr_ma20 = simulation_df['MA20'].iloc[-1]
         curr_atr = simulation_df['ATR'].iloc[-1]
         
@@ -556,9 +506,8 @@ def predict_next_5(stock, days, decay_factor):
         predictions[date.date()] = float(final_pred)
         predicted_prices.append(final_pred)
         
-        # 模擬下一天 (不加隨機雜訊，只用指標重算)
         sim_open = final_pred
-        sim_high = final_pred + (curr_atr * 0.2) # 假設微幅波動
+        sim_high = final_pred + (curr_atr * 0.2)
         sim_low = final_pred - (curr_atr * 0.2)
         sim_vol = simulation_df['Volume'].mean()
         
@@ -612,12 +561,32 @@ st.markdown("""
 st.title("📈 AI 智能股價分析 Pro")
 st.markdown("整合機器學習預測與傳統技術指標的輔助決策系統")
 
+# Session State for History
+if 'recent_stocks' not in st.session_state:
+    st.session_state.recent_stocks = []
+
+# Sidebar Logic
 with st.sidebar:
     st.header("⚙️ 設定參數")
     data_source = st.radio("資料來源", ["自動下載 (yfinance)", "手動貼上CSV資料"])
     
     if data_source == "自動下載 (yfinance)":
-        code = st.text_input("股票代號", "2330")
+        # History Dropdown
+        if st.session_state.recent_stocks:
+            selected_history = st.selectbox(
+                "📜 最近瀏覽紀錄", 
+                ["請選擇..."] + st.session_state.recent_stocks
+            )
+            if selected_history != "請選擇...":
+                # Extract code from "2330.TW 台積電"
+                default_code = selected_history.split(" ")[0].replace(".TW", "")
+            else:
+                default_code = "2330"
+        else:
+            default_code = "2330"
+
+        code = st.text_input("股票代號", value=default_code)
+        
         strategy_type = st.radio("偵測訊號方向", ["買進策略", "賣出策略"])
         mode = st.selectbox("預測模型", ["短期 (敏感)", "中期 (平衡)", "長期 (穩健)"])
         
@@ -630,6 +599,9 @@ with st.sidebar:
     else:
         st.info("手動模式不支援 AI 預測，僅提供技術指標分析")
 
+# Call update function when history is selected to update session state if needed
+# But simplified logic above works by setting 'value' of text_input
+
 if st.button("🚀 開始分析", type="primary", use_container_width=True):
     
     df_result = pd.DataFrame()
@@ -641,12 +613,30 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
         full_code = code.strip().upper()
         if full_code.isdigit(): full_code += ".TW"
         
-        with st.spinner(f"正在分析 {full_code} ..."):
+        # Get Name for Title
+        stock_name = stock_name_dict.get(full_code, "未知名稱")
+        if stock_name == "未知名稱":
+             # Try to fetch info if not in dict (simplified)
+             try:
+                 ticker = yf.Ticker(full_code)
+                 # stock_name = ticker.info.get('longName', full_code) # This is slow, use dict for now
+                 pass
+             except:
+                 pass
+
+        with st.spinner(f"正在分析 {stock_name} ({full_code}) ..."):
             last_price, forecast, preds, df_result = predict_next_5(full_code, days, decay_factor)
             
             if df_result is not None and not df_result.empty:
-                company_name = stock_name_dict.get(full_code, full_code)
-                st.subheader(f"{company_name} ({full_code})")
+                # Update History
+                history_item = f"{full_code} {stock_name}"
+                if history_item not in st.session_state.recent_stocks:
+                    st.session_state.recent_stocks.insert(0, history_item)
+                    # Keep only last 10
+                    if len(st.session_state.recent_stocks) > 10:
+                        st.session_state.recent_stocks.pop()
+                
+                st.subheader(f"{stock_name} ({full_code}) - 股價分析報告")
                 is_low_volume = len(df_result) < 50
             else:
                 st.error("無法取得資料，請檢查代號或網絡。")
@@ -659,7 +649,7 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
                 df_result = pd.read_csv(io.StringIO(manual_data))
                 df_result['Date'] = pd.to_datetime(df_result['Date'])
                 df_result.set_index('Date', inplace=True)
-                df_result = add_technical_indicators(df_result, CFG) # 使用統一的計算函式
+                df_result = add_technical_indicators(df_result, CFG)
                 last_price = df_result['Close'].iloc[-1]
                 st.success("資料讀取成功")
             except Exception as e:
@@ -672,7 +662,6 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
         with col1:
             st.markdown("### 📊 訊號儀表板")
             
-            # NEW CODE HERE
             st.metric("📉 基準收盤價 (Last Close)", f"${last_price:.2f}", help="這是 AI 預測的起點價格，即最近一個交易日的收盤價")
             
             strat_type_key = "buy" if strategy_type == "買進策略" else "sell"
@@ -730,12 +719,10 @@ if st.button("🚀 開始分析", type="primary", use_container_width=True):
         st.subheader("🎯 AI 準確度檢測 (歷史回測)")
         
         if 'AI_Pred' in df_result.columns:
-            # 顯示誤差圖表
             acc_fig = plot_accuracy_chart(df_result)
             if acc_fig:
                 st.plotly_chart(acc_fig, use_container_width=True)
             
-            # 計算近期準確度數據
             recent_df = df_result.tail(30)
             mae = np.mean(np.abs(recent_df['AI_Pred'] - recent_df['Close']))
             mape = np.mean(np.abs((recent_df['AI_Pred'] - recent_df['Close']) / recent_df['Close'])) * 100
