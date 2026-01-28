@@ -2,20 +2,20 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass
-from datetime import datetime, time
-import pytz
 import io
 import warnings
-
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import mean_absolute_error
-from sklearn.ensemble import HistGradientBoostingRegressor
+from dataclasses import dataclass
+from datetime import datetime, time
 
 import ta
 from ta.volatility import BollingerBands
 from ta.trend import ADXIndicator
 from ta.momentum import StochasticOscillator
+
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import mean_absolute_error
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
 
 warnings.filterwarnings("ignore")
 
@@ -29,6 +29,14 @@ except Exception as e:
     HAS_PLOTLY = False
     PLOTLY_ERROR = str(e)
 
+# ====== TW market calendar optional ======
+HAS_TW_CAL = False
+try:
+    import pandas_market_calendars as mcal
+    HAS_TW_CAL = True
+except Exception:
+    HAS_TW_CAL = False
+
 # ====== 參數設定 ======
 @dataclass
 class Config:
@@ -36,19 +44,26 @@ class Config:
     top_lookback: int = 20
     higher_high_lookback: int = 5
     lower_low_lookback: int = 5
+
     stoch_k: int = 9
     stoch_d: int = 3
     stoch_smooth: int = 3
     kd_threshold: float = 20.0
     kd_threshold_sell: float = 80.0
+
     ma_short: int = 20
     ma_long: int = 60
     volume_ma: int = 20
     atr_period: int = 14
+
     risk_per_trade: float = 0.01
     capital: float = 1_000_000
+
     fwd_days: int = 5
-    backtest_lookback_days: int = 252
+    # 回測與模型訓練控制（強化版會更吃算力，這裡做合理限制）
+    train_min_rows: int = 140           # 最小訓練樣本
+    backtest_max_rows: int = 420        # 近約 1.5~2 年交易日
+    retrain_every: int = 5              # 回測時每 N 天重訓一次（大幅加速）
 
 CFG = Config()
 
@@ -70,7 +85,9 @@ stock_name_dict = {
     "3443.TW": "創意", "3661.TW": "世芯-KY", "3017.TW": "奇鋐", "3324.TW": "雙鴻"
 }
 
-# ====== 資料下載（處理 MultiIndex） ======
+# =========================
+# Utils
+# =========================
 def safe_download(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     df = yf.download(symbol, start=start, end=end, interval="1d", auto_adjust=True, progress=False)
     if df is None or df.empty:
@@ -85,7 +102,41 @@ def pick_market_index(stock_code: str):
         return ["^TWII", "0050.TW"]  # 台股：加權指數優先，ETF fallback
     return ["^GSPC"]  # 美股：S&P 500
 
-# ====== 技術指標 ======
+def market_status(code: str):
+    """更準確的『是否交易日/盤中』顯示。台股優先用交易日曆；沒有套件就 fallback。"""
+    is_tw = code.upper().endswith(".TW")
+
+    # 台股用 XTAI 交易日曆（如果可用）
+    if is_tw and HAS_TW_CAL:
+        try:
+            cal = mcal.get_calendar("XTAI")
+            now = pd.Timestamp.now(tz="Asia/Taipei")
+            sched = cal.schedule(start_date=now.date(), end_date=now.date())
+            if sched.empty:
+                return "非交易日", False
+            open_t = sched.iloc[0]["market_open"].tz_convert("Asia/Taipei")
+            close_t = sched.iloc[0]["market_close"].tz_convert("Asia/Taipei")
+            if open_t <= now <= close_t:
+                return "盤中", True
+            return "已收盤", False
+        except Exception:
+            pass
+
+    # fallback（簡化）：週末非交易；台股 9:00~13:30，美股不做盤中判斷（避免誤導）
+    now_tw = datetime.now()
+    if now_tw.weekday() >= 5:
+        return "非交易日(推測)", False
+
+    if is_tw:
+        if time(9, 0) <= now_tw.time() <= time(13, 30):
+            return "盤中(推測)", True
+        return "已收盤(推測)", False
+
+    return "日線資料(不判斷盤中)", False
+
+# =========================
+# Feature engineering
+# =========================
 def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     df = df.copy()
     close = df["Close"]
@@ -121,7 +172,7 @@ def add_technical_indicators(df: pd.DataFrame, cfg: Config):
     atr_indicator = ta.volatility.AverageTrueRange(high, low, close, window=cfg.atr_period)
     df["ATR"] = atr_indicator.average_true_range()
 
-    # 簡單的底/頂參考 + 量均
+    # 底/頂參考 + 量均
     df["RecentLow"] = close.rolling(cfg.bottom_lookback).min()
     df["PriorHigh"] = close.shift(1).rolling(cfg.higher_high_lookback).max()
     df["RecentHigh"] = close.rolling(cfg.top_lookback).max()
@@ -139,7 +190,40 @@ def add_return_features(df: pd.DataFrame):
     df["VolChg"] = df["Volume"].pct_change().replace([np.inf, -np.inf], np.nan)
     return df
 
-# ====== 訊號生成（保留你原本邏輯，微調可讀性） ======
+def build_dataset(stock_code: str, lookback_days: int):
+    end = pd.Timestamp(datetime.today().date()) + pd.Timedelta(days=1)
+    start = end - pd.Timedelta(days=lookback_days)
+
+    df = safe_download(stock_code, start, end)
+    if df.empty:
+        return pd.DataFrame()
+
+    # market index
+    idx_df = pd.DataFrame()
+    for idx in pick_market_index(stock_code):
+        tmp = safe_download(idx, start, end)
+        if not tmp.empty and "Close" in tmp.columns:
+            idx_df = tmp
+            break
+
+    if idx_df.empty:
+        df["Market_Close"] = np.nan
+    else:
+        df["Market_Close"] = idx_df["Close"].reindex(df.index).ffill()
+
+    df = add_technical_indicators(df, CFG)
+    df = add_return_features(df)
+
+    # relative strength
+    df["Mkt_Ret1"] = np.log(df["Market_Close"]).diff()
+    df["RelStrength1"] = df["Ret1"] - df["Mkt_Ret1"]
+
+    df = df.dropna().copy()
+    return df
+
+# =========================
+# Signal logic (保留你原策略，但用於「技術面訊號」區塊)
+# =========================
 def generate_signal_row_buy(row_prior, row_now, cfg: Config):
     reasons = []
     bottom_built = (row_now["Close"] <= row_now["RecentLow"] * 1.08) and (row_now["Close"] > (row_now["PriorHigh"] * 0.8))
@@ -185,7 +269,6 @@ def generate_signal_row_sell(row_prior, row_now, cfg: Config):
     return all_ok, reasons
 
 def evaluate_latest(df: pd.DataFrame, cfg: Config, strategy_type: str):
-    # basic data length check
     need = max(cfg.ma_long, cfg.bottom_lookback, cfg.top_lookback, cfg.atr_period) + 5
     if len(df) < need:
         return {"是否符合訊號": False, "理由": "資料樣本太短", "動作": "無", "建議停損": 0, "估計ATR": 0, "建議股數": 0}
@@ -224,54 +307,77 @@ def evaluate_latest(df: pd.DataFrame, cfg: Config, strategy_type: str):
         "建議股數": int(position_size)
     }
 
-# ====== 時序交叉驗證 ======
-def rolling_cv_metrics(X, y, model, n_splits=5):
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    maes, mapes = [], []
-    for tr, te in tscv.split(X):
-        model.fit(X[tr], y[tr])
-        pred = model.predict(X[te])
-        true = y[te]
-        mae = mean_absolute_error(true, pred)
-        mape = np.mean(np.abs((pred - true) / np.maximum(true, 1e-9))) * 100
-        maes.append(mae)
-        mapes.append(mape)
-    return float(np.mean(maes)), float(np.mean(mapes))
+# =========================
+# Strong ML: Ensemble + TimeSeries CV weights
+# =========================
+def cv_weighted_ensemble_train(X: np.ndarray, y: np.ndarray, seed: int = 42):
+    """
+    回傳：trained_models(dict), weights(dict), cv_metrics(dict)
+    權重 = 1 / CV_MAE（再正規化）
+    """
+    models = {
+        "HGB": HistGradientBoostingRegressor(
+            max_depth=6,
+            learning_rate=0.05,
+            max_iter=400,
+            random_state=seed
+        ),
+        "RF": RandomForestRegressor(
+            n_estimators=300,
+            max_depth=10,
+            min_samples_split=6,
+            random_state=seed,
+            n_jobs=-1
+        )
+    }
 
-# ====== 2026 升級版預測（點估計 + 區間） ======
+    tscv = TimeSeriesSplit(n_splits=5)
+    maes = {}
+
+    for name, model in models.items():
+        fold_mae = []
+        for tr, te in tscv.split(X):
+            model.fit(X[tr], y[tr])
+            pred = model.predict(X[te])
+            fold_mae.append(mean_absolute_error(y[te], pred))
+        maes[name] = float(np.mean(fold_mae))
+
+    # weights: inverse MAE
+    inv = {k: (1.0 / max(v, 1e-9)) for k, v in maes.items()}
+    s = sum(inv.values())
+    weights = {k: (inv[k] / s) for k in inv}
+
+    # train final on full
+    trained = {}
+    for name, model in models.items():
+        model.fit(X, y)
+        trained[name] = model
+
+    cv_metrics = {"cv_mae": maes, "weights": weights}
+    return trained, weights, cv_metrics
+
+def ensemble_predict(models: dict, weights: dict, X: np.ndarray) -> np.ndarray:
+    pred = None
+    for name, m in models.items():
+        p = m.predict(X)
+        w = weights.get(name, 0.0)
+        pred = p * w if pred is None else pred + p * w
+    return pred
+
+def estimate_interval_sigma(y_true: np.ndarray, y_pred: np.ndarray):
+    resid = y_true - y_pred
+    if resid.size >= 80:
+        resid = resid[-80:]
+    return float(np.std(resid))
+
+# =========================
+# Strong prediction (5 days) + interval
+# =========================
 @st.cache_data(ttl=3600)
-def predict_next_5(stock: str, days: int, decay_factor: float):
-    end = pd.Timestamp(datetime.today().date()) + pd.Timedelta(days=1)
-    start = end - pd.Timedelta(days=days * 2)
-
-    df = safe_download(stock, start, end)
-    if df.empty:
-        return None, None, None, pd.DataFrame(), {"cv_mae": None, "cv_mape": None, "resid_sigma": None}
-
-    # Market index
-    idx_df = pd.DataFrame()
-    for idx in pick_market_index(stock):
-        tmp = safe_download(idx, start, end)
-        if not tmp.empty and "Close" in tmp.columns:
-            idx_df = tmp
-            break
-
-    if idx_df.empty:
-        df["Market_Close"] = np.nan
-    else:
-        df["Market_Close"] = idx_df["Close"].reindex(df.index).ffill()
-
-    # indicators + returns
-    df = add_technical_indicators(df, CFG)
-    df = add_return_features(df)
-
-    # relative strength
-    df["Mkt_Ret1"] = np.log(df["Market_Close"]).diff()
-    df["RelStrength1"] = df["Ret1"] - df["Mkt_Ret1"]
-
-    df = df.dropna().copy()
-    if len(df) < 80:
-        return None, None, None, df, {"cv_mae": None, "cv_mape": None, "resid_sigma": None}
+def predict_next_5_strong(stock_code: str, lookback_days: int):
+    df = build_dataset(stock_code, lookback_days)
+    if df.empty or len(df) < CFG.train_min_rows:
+        return None, None, None, pd.DataFrame(), {"error": "資料不足或下載失敗"}
 
     feats = [
         "Ret1", "Ret5", "Vol10", "Vol20", "VolChg",
@@ -284,73 +390,219 @@ def predict_next_5(stock: str, days: int, decay_factor: float):
     X = df[feats].values
     y = df["Close"].values
 
-    # recency weights
-    w = np.exp(-decay_factor * np.arange(len(X))[::-1])
-    w = w / np.sum(w)
+    models, weights, cvm = cv_weighted_ensemble_train(X, y)
+    y_pred = ensemble_predict(models, weights, X)
 
-    model = HistGradientBoostingRegressor(
-        max_depth=6,
-        learning_rate=0.05,
-        max_iter=400,
-        random_state=42
-    )
-    model.fit(X, y, sample_weight=w)
+    df = df.copy()
+    df["AI_Pred"] = y_pred
 
-    df["AI_Pred"] = model.predict(X)
-
-    # residual sigma for interval (粗略，但比沒有好)
-    resid = df["Close"].values - df["AI_Pred"].values
-    resid_sigma = float(np.std(resid[-60:])) if len(resid) >= 60 else float(np.std(resid))
-
-    # time-series CV (more honest)
-    cv_mae, cv_mape = rolling_cv_metrics(
-        X, y,
-        HistGradientBoostingRegressor(max_depth=6, learning_rate=0.05, max_iter=400, random_state=42),
-        n_splits=5
-    )
-
+    sigma = estimate_interval_sigma(y, y_pred)
     last_close = float(df["Close"].iloc[-1])
+
+    # 5 business days
     future_dates = pd.bdate_range(start=df.index[-1], periods=6)[1:]
 
-    preds = {}
-    pred_prices = []
-    pred_hi = []
-    pred_lo = []
+    # minimal extrapolation: use last feature row unchanged
+    x_last = df[feats].iloc[-1:].values
+    point_preds = ensemble_predict(models, weights, np.repeat(x_last, repeats=5, axis=0)).tolist()
 
-    # minimal extrapolation: use last feature row as anchor
-    last_feat_row = df[feats].iloc[-1:].copy()
-    last_atr = float(df["ATR"].iloc[-1])
+    # guard rails by MA20 +/- 3*ATR
     last_ma20 = float(df["MA20"].iloc[-1])
+    last_atr = float(df["ATR"].iloc[-1])
+    upper = last_ma20 + 3 * last_atr
+    lower = last_ma20 - 3 * last_atr
 
-    for d in future_dates:
-        x_last = last_feat_row.values
-        p = float(model.predict(x_last)[0])
+    point_preds = [min(max(float(p), lower), upper) for p in point_preds]
 
-        # guard rails by MA20 +/- 3*ATR
-        upper = last_ma20 + 3 * last_atr
-        lower = last_ma20 - 3 * last_atr
-        p = min(max(p, lower), upper)
+    # ~80% interval using 1.28*sigma plus small ATR cushion
+    hi = [p + 1.28 * sigma + 0.25 * last_atr for p in point_preds]
+    lo = [p - 1.28 * sigma - 0.25 * last_atr for p in point_preds]
 
-        # interval: +/- 1.28 sigma (約 80% 近似區間) + 再加上 ATR 小幅保守
-        hi = p + 1.28 * resid_sigma + 0.25 * last_atr
-        lo = p - 1.28 * resid_sigma - 0.25 * last_atr
+    forecast = {d.date(): float(p) for d, p in zip(future_dates, point_preds)}
+    preds_dict = {f"T+{i+1}": float(p) for i, p in enumerate(point_preds)}
 
-        preds[d.date()] = p
-        pred_prices.append(p)
-        pred_hi.append(hi)
-        pred_lo.append(lo)
+    extra = {
+        "cv_mae": cvm["cv_mae"],
+        "weights": cvm["weights"],
+        "sigma": sigma,
+        "future_dates": list(future_dates),
+        "pred_hi": hi,
+        "pred_lo": lo
+    }
+    return last_close, forecast, preds_dict, df, extra
 
-    preds_dict = {f"T+{i+1}": float(p) for i, p in enumerate(pred_prices)}
+# =========================
+# Strong realistic backtest (Close->Close + MFE/MAE)
+# - speed optimized: limit rows + retrain every N steps
+# =========================
+@st.cache_data(ttl=3600)
+def realistic_backtest_strong(df: pd.DataFrame, direction: str):
+    """
+    direction:
+      - "buy": 看多策略回測
+      - "sell": 看空策略回測（以反向報酬計算）
+    回測觸發：使用你原本的技術面訊號（買/賣）作為 entry
+    報酬計算：Close-to-Close（T+fwd_days 的收盤）
+    MFE/MAE：使用未來 fwd_days 內的最高/最低（用來看承受回撤與潛在）
+    """
+    if df is None or df.empty:
+        return {}
 
-    extra = {"cv_mae": cv_mae, "cv_mape": cv_mape, "resid_sigma": resid_sigma,
-             "pred_hi": pred_hi, "pred_lo": pred_lo, "future_dates": list(future_dates)}
+    # limit backtest window for speed
+    df_bt = df.tail(CFG.backtest_max_rows).dropna().copy()
+    if len(df_bt) < CFG.train_min_rows + CFG.fwd_days + 10:
+        return {}
 
-    return last_close, preds, preds_dict, df, extra
+    feats = [
+        "Ret1", "Ret5", "Vol10", "Vol20", "VolChg",
+        "MA5", "MA10", "MA20", "MA60",
+        "RSI", "MACD", "ADX",
+        "BB_High", "BB_Low",
+        "RelStrength1"
+    ]
 
-def get_trade_advice(last, preds):
-    if not preds:
+    # Precompute signal points
+    signal_idx = []
+    for i in range(2, len(df_bt) - CFG.fwd_days):
+        row_prior = df_bt.iloc[i-1]
+        row_now = df_bt.iloc[i]
+        if direction == "buy":
+            ok, _ = generate_signal_row_buy(row_prior, row_now, CFG)
+        else:
+            ok, _ = generate_signal_row_sell(row_prior, row_now, CFG)
+        if ok:
+            signal_idx.append(i)
+
+    if not signal_idx:
+        return {"樣本數": 0, "勝率(%)": 0.0, "平均報酬(%)": 0.0, "平均MFE(%)": 0.0, "平均MAE(%)": 0.0}
+
+    results = []
+    models = None
+    weights = None
+    last_train_end = None
+
+    for j, i in enumerate(signal_idx):
+        train_end = i  # exclusive
+        if train_end < CFG.train_min_rows:
+            continue
+
+        # retrain every N signals OR if no model yet
+        if (models is None) or (last_train_end is None) or ((train_end - last_train_end) >= CFG.retrain_every):
+            train_df = df_bt.iloc[:train_end].copy()
+            Xtr = train_df[feats].values
+            ytr = train_df["Close"].values
+            if len(train_df) < CFG.train_min_rows:
+                continue
+            models, weights, _ = cv_weighted_ensemble_train(Xtr, ytr)
+            last_train_end = train_end
+
+        entry = float(df_bt["Close"].iloc[i])
+        future = df_bt.iloc[i+1:i+1+CFG.fwd_days]
+        if future.empty or len(future) < CFG.fwd_days:
+            continue
+
+        exit_close = float(future["Close"].iloc[-1])
+        future_high = float(future["High"].max())
+        future_low = float(future["Low"].min())
+
+        # Close->Close return
+        if direction == "buy":
+            ret = (exit_close - entry) / entry
+            mfe = (future_high - entry) / entry
+            mae = (future_low - entry) / entry
+        else:
+            # short: profit when price drops
+            ret = (entry - exit_close) / entry
+            mfe = (entry - future_low) / entry      # best favorable move (price down)
+            mae = (entry - future_high) / entry     # adverse move (price up) => usually negative
+
+        results.append({"ret": ret, "mfe": mfe, "mae": mae})
+
+    if not results:
+        return {"樣本數": 0, "勝率(%)": 0.0, "平均報酬(%)": 0.0, "平均MFE(%)": 0.0, "平均MAE(%)": 0.0}
+
+    r = pd.DataFrame(results)
+    return {
+        "樣本數": int(len(r)),
+        "勝率(%)": round(float((r["ret"] > 0).mean() * 100), 1),
+        "平均報酬(%)": round(float(r["ret"].mean() * 100), 2),
+        "中位數報酬(%)": round(float(r["ret"].median() * 100), 2),
+        "平均MFE(%)": round(float(r["mfe"].mean() * 100), 2),
+        "平均MAE(%)": round(float(r["mae"].mean() * 100), 2),
+        "5%最差報酬(%)": round(float(np.percentile(r["ret"], 5) * 100), 2),
+        "95%最好報酬(%)": round(float(np.percentile(r["ret"], 95) * 100), 2),
+    }
+
+# =========================
+# Plot
+# =========================
+def plot_stock_data(df: pd.DataFrame, extra=None):
+    if not HAS_PLOTLY:
+        return None
+
+    df = df.copy()
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        vertical_spacing=0.06, row_heights=[0.7, 0.3],
+        subplot_titles=("股價走勢（含AI軌跡/預測）", "成交量")
+    )
+
+    fig.add_trace(
+        go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="K線"),
+        row=1, col=1
+    )
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], name="MA20"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA60"], name="MA60"), row=1, col=1)
+
+    if "AI_Pred" in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df["AI_Pred"], name="AI 歷史預測(Ensemble)", line=dict(dash="dot")), row=1, col=1)
+
+    if extra and extra.get("future_dates") is not None:
+        fd = extra["future_dates"]
+        hi = extra.get("pred_hi")
+        lo = extra.get("pred_lo")
+
+        # point use mid of band if provided, otherwise just skip band
+        if hi is not None and lo is not None:
+            mid = [(h + l) / 2 for h, l in zip(hi, lo)]
+            connect_x = [df.index[-1]] + list(fd)
+            connect_y = [float(df["Close"].iloc[-1])] + list(mid)
+            fig.add_trace(go.Scatter(x=connect_x, y=connect_y, name="AI 未來預測", line=dict(dash="dash", width=3)), row=1, col=1)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=list(fd) + list(fd)[::-1],
+                    y=hi + lo[::-1],
+                    fill="toself",
+                    name="預測區間(約80%)",
+                    opacity=0.2,
+                    line=dict(width=0)
+                ),
+                row=1, col=1
+            )
+
+    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume"), row=2, col=1)
+    fig.update_layout(height=650, xaxis_rangeslider_visible=False, hovermode="x unified")
+    return fig
+
+def plot_error_chart(df: pd.DataFrame):
+    if not HAS_PLOTLY or "AI_Pred" not in df.columns:
+        return None
+    d = df.tail(80).copy()
+    d["ErrPct"] = ((d["AI_Pred"] - d["Close"]) / d["Close"]) * 100
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=d.index, y=d["ErrPct"], mode="lines+markers", name="誤差(%)"))
+    fig.add_shape(type="line", x0=d.index[0], y0=0, x1=d.index[-1], y1=0, line=dict(dash="dash"))
+    fig.update_layout(height=320, hovermode="x unified", title="AI 歷史誤差趨勢（近80日）", yaxis_title="(AI_Pred - Close)/Close %")
+    return fig
+
+# =========================
+# Advice
+# =========================
+def get_trade_advice(last, forecast):
+    if not forecast:
         return "無法判斷"
-    avg_pred = float(np.mean(list(preds.values())))
+    avg_pred = float(np.mean(list(forecast.values())))
     change_percent = ((avg_pred - last) / last) * 100
     if change_percent > 2.0:
         return f"強烈看漲 (預期 +{change_percent:.1f}%)"
@@ -362,73 +614,20 @@ def get_trade_advice(last, preds):
         return f"看跌 (預期 {change_percent:.1f}%)"
     return f"盤整 (預期 {change_percent:.1f}%)"
 
-# ====== Plot ======
-def plot_stock_data(df, extra=None):
-    if not HAS_PLOTLY:
-        return None
-
-    df = df.copy()
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True,
-        vertical_spacing=0.06, row_heights=[0.7, 0.3],
-        subplot_titles=("股價走勢（含AI預測軌跡）", "成交量")
-    )
-
-    fig.add_trace(
-        go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name="K線"),
-        row=1, col=1
-    )
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA20"], name="MA20"), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA60"], name="MA60"), row=1, col=1)
-
-    if "AI_Pred" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df["AI_Pred"], name="AI 歷史預測", line=dict(dash="dot")), row=1, col=1)
-
-    # future forecast line + interval
-    if extra and extra.get("future_dates") and extra.get("pred_hi") and extra.get("pred_lo"):
-        fd = extra["future_dates"]
-        hi = extra["pred_hi"]
-        lo = extra["pred_lo"]
-
-        # point forecast (use preds from dict order)
-        # make a simple line from last close to forecast points
-        # (we don't inject them into df to avoid drift)
-        # Build x/y
-        # Here: use mean of hi/lo as point, or use separate preds is fine
-        # We'll use middle: (hi+lo)/2 for display alignment
-        mid = [(h + l) / 2 for h, l in zip(hi, lo)]
-
-        connect_x = [df.index[-1]] + list(fd)
-        connect_y = [float(df["Close"].iloc[-1])] + list(mid)
-
-        fig.add_trace(go.Scatter(x=connect_x, y=connect_y, name="AI 未來預測", line=dict(dash="dash", width=3)), row=1, col=1)
-
-        # interval band (only for future)
-        fig.add_trace(go.Scatter(x=list(fd) + list(fd)[::-1],
-                                 y=hi + lo[::-1],
-                                 fill="toself",
-                                 name="預測區間(約80%)",
-                                 opacity=0.2,
-                                 line=dict(width=0)),
-                      row=1, col=1)
-
-    fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume"), row=2, col=1)
-
-    fig.update_layout(height=650, xaxis_rangeslider_visible=False, hovermode="x unified")
-    return fig
-
-# ====== UI ======
-st.set_page_config(page_title="AI 智能股價分析 Pro (2026)", layout="wide", page_icon="📈")
+# =========================
+# Streamlit UI
+# =========================
+st.set_page_config(page_title="AI 智能股價分析 Pro", layout="wide", page_icon="📈")
 
 st.markdown("""
 <style>
 .metric-card {background-color:#f0f2f6;border-radius:10px;padding:15px;margin:10px 0;}
-.suggestion-box {padding:20px;border-radius:10px;text-align:center;margin-bottom:20px;}
+.suggestion-box {padding:18px;border-radius:12px;text-align:center;margin-bottom:14px;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📈 AI 智能股價分析 Pro（2026 重寫版）")
-st.markdown("整合機器學習預測、技術指標與時序交叉驗證（避免過度樂觀）。")
+st.title("📈 AI 智能股價分析 Pro（更強重寫版｜真實回測 + Ensemble + 台股交易日曆）")
+st.caption("提醒：本工具僅供研究與學習，不構成投資建議。")
 
 if "recent_stocks" not in st.session_state:
     st.session_state.recent_stocks = []
@@ -449,31 +648,33 @@ with st.sidebar:
 
         code = st.text_input("股票代號（台股可輸入 2330）", value=default_code)
 
-        strategy_type = st.radio("偵測訊號方向", ["買進策略", "賣出策略"])
-        mode = st.selectbox("模型敏感度", ["短期 (敏感)", "中期 (平衡)", "長期 (穩健)"])
-
-        mode_map = {
-            "短期 (敏感)": (200, 0.012),
-            "中期 (平衡)": (400, 0.006),
-            "長期 (穩健)": (800, 0.002),
-        }
-        days, decay_factor = mode_map[mode]
+        strategy_type = st.radio("技術面訊號方向", ["買進策略", "賣出策略"])
+        mode = st.selectbox("訓練資料量（越多越穩、越慢）", ["短 (約 1 年)", "中 (約 2 年)", "長 (約 4 年)"])
+        mode_map = {"短 (約 1 年)": 420, "中 (約 2 年)": 840, "長 (約 4 年)": 1680}
+        lookback_days = mode_map[mode]
 
         show_interval = st.checkbox("顯示預測區間（建議開）", value=True)
+        show_backtest = st.checkbox("顯示真實回測（較耗時）", value=True)
+
+        st.divider()
+        if code.strip().upper().endswith(".TW") or code.strip().isdigit():
+            st.caption(f"台股交易日曆：{'已啟用(XTAI)' if HAS_TW_CAL else '未安裝套件，使用推測模式'}")
+        else:
+            st.caption("美股：不做盤中判斷（避免時區/盤中誤導）")
     else:
-        st.info("手動模式：僅技術指標與訊號，不跑 AI 預測")
         show_interval = False
+        show_backtest = False
+        st.info("手動模式：僅技術面訊號與指標，不跑 AI 預測 / 回測（避免錯誤）")
 
 run_btn = st.button("🚀 開始分析", type="primary", use_container_width=True)
 
 if run_btn:
     df_result = pd.DataFrame()
+    last_price = None
     forecast = None
     preds = None
-    last_price = None
     extra = {}
 
-    # ---- data ----
     if data_source == "自動下載 (yfinance)":
         full_code = code.strip().upper()
         if full_code.isdigit():
@@ -481,11 +682,11 @@ if run_btn:
 
         stock_name = stock_name_dict.get(full_code, "未知名稱")
 
-        with st.spinner(f"正在分析 {stock_name} ({full_code}) ..."):
-            last_price, forecast, preds, df_result, extra = predict_next_5(full_code, days, decay_factor)
+        with st.spinner(f"下載 + 訓練 Ensemble + 預測中：{stock_name} ({full_code}) ..."):
+            last_price, forecast, preds, df_result, extra = predict_next_5_strong(full_code, lookback_days)
 
         if df_result is None or df_result.empty or last_price is None:
-            st.error("無法取得資料，請檢查代號或網路連線。")
+            st.error("無法取得資料或有效樣本不足。請檢查代號或調高訓練資料量。")
             st.stop()
 
         history_item = f"{full_code} {stock_name}"
@@ -494,32 +695,33 @@ if run_btn:
             if len(st.session_state.recent_stocks) > 10:
                 st.session_state.recent_stocks.pop()
 
-        st.subheader(f"{stock_name} ({full_code}) - 股價分析報告（資料時間：{df_result.index[-1].strftime('%Y-%m-%d')}）")
+        st.subheader(f"{stock_name} ({full_code}) - 分析報告（資料日期：{df_result.index[-1].strftime('%Y-%m-%d')}）")
+        status_text, is_open = market_status(full_code)
 
     else:
-        manual_data = st.text_area("貼上 CSV（需含 Date, Open, High, Low, Close, Volume 欄位）", height=200)
-        if manual_data:
-            try:
-                df_result = pd.read_csv(io.StringIO(manual_data))
-                df_result["Date"] = pd.to_datetime(df_result["Date"])
-                df_result.set_index("Date", inplace=True)
-                df_result = add_technical_indicators(df_result, CFG).dropna()
-                last_price = float(df_result["Close"].iloc[-1])
-            except Exception as e:
-                st.error(f"CSV 格式錯誤: {e}")
-                st.stop()
-        else:
-            st.warning("請先貼上 CSV 資料。")
+        manual_data = st.text_area("貼上 CSV（需含 Date, Open, High, Low, Close, Volume）", height=220)
+        if not manual_data:
+            st.warning("請先貼上 CSV。")
             st.stop()
 
-    # ---- market status (display only) ----
-    tz_tw = pytz.timezone("Asia/Taipei")
-    now_tw = datetime.now(tz_tw)
-    market_open_time = time(9, 0)
-    market_close_time = time(13, 30)
-    is_market_open = (now_tw.weekday() < 5) and (market_open_time <= now_tw.time() <= market_close_time)
-    status_text = "🌞 開盤中（提示用，日線仍以收盤資料為主）" if is_market_open else "🌙 已收盤（使用最近交易日資料）"
+        try:
+            df_result = pd.read_csv(io.StringIO(manual_data))
+            df_result["Date"] = pd.to_datetime(df_result["Date"])
+            df_result.set_index("Date", inplace=True)
+            df_result = add_technical_indicators(df_result, CFG)
+            df_result = add_return_features(df_result)
+            df_result["Market_Close"] = np.nan
+            df_result["Mkt_Ret1"] = np.nan
+            df_result["RelStrength1"] = 0.0
+            df_result = df_result.dropna().copy()
+            last_price = float(df_result["Close"].iloc[-1])
+            status_text, is_open = ("手動資料", False)
+            st.success("CSV 讀取成功（手動模式不跑 AI）。")
+        except Exception as e:
+            st.error(f"CSV 格式錯誤：{e}")
+            st.stop()
 
+    # ===== 技術面訊號區 =====
     strat_key = "buy" if strategy_type == "買進策略" else "sell"
     summary = evaluate_latest(df_result, CFG, strat_key)
 
@@ -544,7 +746,7 @@ if run_btn:
 
     st.markdown(f"""
     <div style="background-color:{signal_color};padding:18px;border-radius:14px;text-align:center;border:2px solid #ccc;color:#333;">
-        <div style="color:#666;">{status_text} | 資料日期: {summary.get('日期','-')}</div>
+        <div style="color:#666;">市場狀態：{status_text} | 資料日期：{summary.get('日期','-')}</div>
         <div style="font-size:34px;margin:8px 0;">{signal_emoji} {signal_text}</div>
         <div style="font-size:16px;"><b>模式:</b> {summary.get('動作','-')} | <b>收盤:</b> {summary.get('收盤','-')}{ai_hint}</div>
     </div>
@@ -553,7 +755,7 @@ if run_btn:
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.markdown("### 📌 詳細訊號與風控")
+        st.markdown("### 📌 訊號與風控")
         st.metric("基準收盤價 (Last Close)", f"{last_price:.2f}")
         st.write(f"**技術面訊號**：{summary.get('理由','-')}")
         st.write(f"**建議停損**：{summary.get('建議停損','-')}")
@@ -561,27 +763,33 @@ if run_btn:
         st.write(f"**建議股數（依資金風險）**：{summary.get('建議股數','-')}")
 
         if forecast:
-            st.markdown("### 🤖 AI 趨勢建議")
+            st.markdown("### 🤖 AI（Ensemble）")
             st.info(f"AI 建議：**{get_trade_advice(last_price, forecast)}**")
 
-        if extra and extra.get("cv_mape") is not None:
-            st.markdown("### ✅ 時序交叉驗證（更可信）")
-            st.write(f"Rolling CV MAE：**{extra['cv_mae']:.2f}**")
-            st.write(f"Rolling CV MAPE：**{extra['cv_mape']:.2f}%**")
+            st.markdown("#### 🧩 模型權重（自動用 CV MAE 決定）")
+            w = extra.get("weights", {})
+            c = extra.get("cv_mae", {})
+            if w and c:
+                st.write(f"- 權重：HGB {w.get('HGB',0):.2f}｜RF {w.get('RF',0):.2f}")
+                st.write(f"- CV MAE：HGB {c.get('HGB',np.nan):.3f}｜RF {c.get('RF',np.nan):.3f}")
+            st.write(f"- 殘差波動 sigma（用於區間估計）：{extra.get('sigma', np.nan):.3f}")
 
     with col2:
         st.markdown("### 📈 圖表")
-        plot_df = df_result.tail(160).copy()
+        plot_df = df_result.tail(180).copy()
 
         if HAS_PLOTLY:
-            fig = plot_stock_data(plot_df, extra if (show_interval and data_source == "自動下載 (yfinance)") else None)
+            fig = plot_stock_data(plot_df, extra if (show_interval and forecast) else None)
             st.plotly_chart(fig, use_container_width=True)
+            err_fig = plot_error_chart(df_result)
+            if err_fig:
+                st.plotly_chart(err_fig, use_container_width=True)
         else:
             st.warning("⚠️ 未安裝 plotly，改用簡易線圖。")
             st.line_chart(plot_df[["Close", "MA20", "MA60"]].dropna())
 
         if forecast:
-            st.markdown("### 🔮 未來 5 日預測（點估計）")
+            st.markdown("### 🔮 未來 5 日預測")
             f_dates = list(forecast.keys())
             f_vals = list(forecast.values())
 
@@ -591,11 +799,35 @@ if run_btn:
                 "漲跌幅": [f"{(v - last_price) / last_price * 100:+.2f}%" for v in f_vals],
             })
 
-            if show_interval and extra and extra.get("pred_hi"):
-                f_df["區間下界(約80%)"] = [f"{v:.2f}" for v in extra["pred_lo"]]
-                f_df["區間上界(約80%)"] = [f"{v:.2f}" for v in extra["pred_hi"]]
+            if show_interval:
+                hi = extra.get("pred_hi", None)
+                lo = extra.get("pred_lo", None)
+                if hi is not None and lo is not None:
+                    f_df["區間下界(約80%)"] = [f"{v:.2f}" for v in lo]
+                    f_df["區間上界(約80%)"] = [f"{v:.2f}" for v in hi]
 
             st.table(f_df)
 
+    # ===== 真實回測（更強）=====
+    if show_backtest and data_source == "自動下載 (yfinance)":
+        st.markdown("---")
+        st.subheader("📊 真實回測（Close→Close + MFE/MAE）")
+        st.caption("說明：只在『技術面訊號成立』的日子進場，持有 fwd_days 天後以收盤出場；同時計算 MFE/MAE 觀察潛在與回撤。")
+
+        with st.spinner("回測計算中（較耗時，但已做加速：只取近一段資料 + 每 N 天重訓一次）..."):
+            bt = realistic_backtest_strong(df_result, "buy" if strat_key == "buy" else "sell")
+
+        if not bt:
+            st.info("回測資料不足或訊號太少，無法計算。你可改用『中/長』資料量或換標的。")
+        else:
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
+            m1.metric("樣本數", bt.get("樣本數", 0))
+            m2.metric("勝率", f"{bt.get('勝率(%)', 0):.1f}%")
+            m3.metric("平均報酬", f"{bt.get('平均報酬(%)', 0):.2f}%")
+            m4.metric("中位數報酬", f"{bt.get('中位數報酬(%)', 0):.2f}%")
+            m5.metric("平均MFE", f"{bt.get('平均MFE(%)', 0):.2f}%")
+            m6.metric("平均MAE", f"{bt.get('平均MAE(%)', 0):.2f}%")
+            st.write(f"5%最差報酬：**{bt.get('5%最差報酬(%)', 0):.2f}%**｜95%最好報酬：**{bt.get('95%最好報酬(%)', 0):.2f}%**")
+
     st.markdown("---")
-    st.caption("免責聲明：本工具僅供技術研究與學習，不構成任何投資建議。")
+    st.caption("免責聲明：本工具僅供技術研究與學習，不構成投資建議。")
