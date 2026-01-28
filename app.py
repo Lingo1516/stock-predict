@@ -47,26 +47,30 @@ import ta
 # =========================
 @dataclass
 class Config:
-    lookback_days: int = 1200
-    forecast_days: int = 10              # 你要 10 天
-    min_train_rows: int = 240
+    forecast_days: int = 10              # ✅ 你要 10 天
+    min_train_rows: int = 240            # 有效樣本不足就不跑
 
-    # Guard rails（避免預測爆走）
+    # 訓練資料長度（天）
+    default_lookback_days: int = 1200
+
+    # 預測護欄：用真實歷史 MA20/ATR 限制預測範圍，避免爆走
     atr_period: int = 14
-    guard_atr_mult: float = 3.0          # MA20 +/- 3*ATR
+    guard_atr_mult: float = 3.0
 
-    # Models
+    # Ensemble model settings
     rf_estimators: int = 300
     rf_max_depth: int = 10
     hgb_max_iter: int = 500
 
-    # Interval and simulation
-    interval_z: float = 1.28             # 約 80% 區間
-    sim_paths: int = 200                 # 多情境路徑數
-    sim_noise_mult: float = 1.0          # 模擬噪音倍率（越大越發散）
-    mean_revert_strength: float = 0.25   # 均值回歸強度（0~1，越大越不容易單邊10天）
+    # Interval (about 80%)
+    interval_z: float = 1.28
 
-    # Turning definition (C: RSI + Bollinger)
+    # Scenario simulation
+    sim_paths: int = 200
+    sim_noise_mult: float = 1.0
+    mean_revert_strength: float = 0.25
+
+    # Turning rules (RSI + Bollinger)  ✅ C
     rsi_hi: float = 70.0
     rsi_lo: float = 30.0
     bb_window: int = 20
@@ -76,7 +80,7 @@ CFG = Config()
 
 
 # =========================
-# Utilities
+# Utils
 # =========================
 def safe_download(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     df = yf.download(symbol, start=start, end=end, interval="1d", auto_adjust=True, progress=False)
@@ -114,8 +118,7 @@ def market_status(code: str) -> str:
 
 
 # =========================
-# Feature Engineering
-# 只用 Close/Volume 產生模型特徵，方便遞迴預測時更新，避免 High/Low 自我餵食漂移
+# Feature Engineering (recursive-friendly)
 # =========================
 FEATURES = [
     "Ret1", "Ret5",
@@ -126,15 +129,17 @@ FEATURES = [
 ]
 
 def add_guard_indicators_real(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """只在真實歷史資料上算 ATR（護欄用）"""
+    """只在真實歷史資料上算 MA20/ATR（護欄用）"""
     df = df_raw.copy()
     close = df["Close"].astype(float)
     df["MA20"] = close.rolling(20).mean()
+
     atr = ta.volatility.AverageTrueRange(df["High"], df["Low"], close, window=CFG.atr_period)
     df["ATR"] = atr.average_true_range()
-    return df.dropna()
+    return df.dropna().copy()
 
 def add_model_features(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """模型特徵：只用 Close/Volume 可推進特徵（避免 High/Low 自我餵食）"""
     df = df_raw.copy()
     close = df["Close"].astype(float)
     vol = df["Volume"].astype(float)
@@ -190,7 +195,7 @@ def compute_next_feature_row(close_hist: list[float], vol_hist: list[float]) -> 
 
 
 # =========================
-# Models: Ensemble + CV weighting
+# Ensemble + CV weighting
 # =========================
 def train_ensemble_with_cv(X: np.ndarray, y: np.ndarray, seed: int = 42):
     models = {
@@ -240,16 +245,16 @@ def ensemble_predict(models: dict, weights: dict, X: np.ndarray) -> np.ndarray:
     return pred
 
 def estimate_sigma(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    resid = (y_true - y_pred)
+    resid = y_true - y_pred
     if resid.size >= 80:
         resid = resid[-80:]
     return float(np.std(resid))
 
 
 # =========================
-# 10-day forecast (recursive)
+# 10-day recursive forecast
 # =========================
-def forecast_10_days_recursive(models, weights, df_feat: pd.DataFrame, df_raw: pd.DataFrame, df_guard_real: pd.DataFrame):
+def forecast_recursive(models, weights, df_feat: pd.DataFrame, df_raw: pd.DataFrame, df_guard: pd.DataFrame):
     future_dates = pd.bdate_range(start=df_feat.index[-1], periods=CFG.forecast_days + 1)[1:]
 
     close_hist = df_feat["Close"].astype(float).tolist()
@@ -258,10 +263,10 @@ def forecast_10_days_recursive(models, weights, df_feat: pd.DataFrame, df_raw: p
 
     last_close = float(df_feat["Close"].iloc[-1])
 
-    # guard rails from real MA20/ATR
-    if not df_guard_real.empty:
-        last_ma20 = float(df_guard_real["MA20"].iloc[-1])
-        last_atr = float(df_guard_real["ATR"].iloc[-1])
+    # guard rails
+    if not df_guard.empty:
+        last_ma20 = float(df_guard["MA20"].iloc[-1])
+        last_atr = float(df_guard["ATR"].iloc[-1])
     else:
         last_ma20 = float(df_feat["MA20"].iloc[-1])
         last_atr = 0.0
@@ -273,9 +278,8 @@ def forecast_10_days_recursive(models, weights, df_feat: pd.DataFrame, df_raw: p
     for _ in range(CFG.forecast_days):
         x_next = compute_next_feature_row(close_hist, vol_hist)
         p = float(ensemble_predict(models, weights, x_next)[0])
-        p = min(max(p, lower), upper)  # guard
+        p = min(max(p, lower), upper)
         preds.append(p)
-
         close_hist.append(p)
         vol_hist.append(future_vol)
 
@@ -283,9 +287,9 @@ def forecast_10_days_recursive(models, weights, df_feat: pd.DataFrame, df_raw: p
 
 
 # =========================
-# Turning logic (C: RSI + Bollinger)
+# RSI + Bollinger helpers
 # =========================
-def compute_rsi_and_bbands(close_series: pd.Series):
+def compute_rsi_bbands(close_series: pd.Series):
     rsi = ta.momentum.RSIIndicator(close_series, window=14).rsi()
     bb = ta.volatility.BollingerBands(close_series, window=CFG.bb_window, window_dev=CFG.bb_std)
     bb_h = bb.bollinger_hband()
@@ -294,78 +298,74 @@ def compute_rsi_and_bbands(close_series: pd.Series):
 
 
 # =========================
-# Scenario simulation (multi-path)
+# Scenario simulation + turning stats
+# (NO np.r_ here; use concatenate safely)
 # =========================
 def simulate_paths_and_turning(df_raw: pd.DataFrame, future_dates, base_preds, sigma: float):
-    """
-    用 base_preds 當 drift，加入噪音 + 均值回歸，生成多條路徑。
-    然後統計：
-      - 連漲10天/連跌10天機率
-      - 每一天轉折機率（由漲轉跌 / 由跌轉漲）
-      - 每一天「可能高點/低點」機率（RSI+BB 觸發 + 次日反轉）
-    """
-    n = CFG.sim_paths
-    T = len(base_preds)
+    T = int(len(base_preds))
+    n = int(CFG.sim_paths)
+
+    if T <= 0:
+        turn_df = pd.DataFrame(columns=["日期", "由漲轉跌機率(%)", "由跌轉漲機率(%)", "可能高點(%)_RSI+BB", "可能低點(%)_RSI+BB"])
+        summary = {"連漲10天機率(%)": 0.0, "連跌10天機率(%)": 0.0}
+        return np.zeros((n, 0)), np.zeros((n, 0), dtype=int), turn_df, summary
+
     last_close = float(df_raw["Close"].iloc[-1])
 
-    # 用歷史 close 做均值回歸目標（MA20）
     hist_close = df_raw["Close"].astype(float)
-    ma20 = float(hist_close.tail(20).mean()) if len(hist_close) >= 20 else float(hist_close.mean())
+    ma20_target = float(hist_close.tail(20).mean()) if len(hist_close) >= 20 else float(hist_close.mean())
 
-    # 多條路徑
-    paths = np.zeros((n, T), dtype=float)
-
-    # 用 base_preds 轉成 daily drift（以「預測報酬」當 drift）
-    # 避免 base_preds 單邊導致 10 天都跌：加入 mean-reversion toward MA20
     base = np.array(base_preds, dtype=float)
     base_ret = np.diff(np.log(np.r_[last_close, base]))  # length T
 
     rng = np.random.default_rng(42)
+    paths = np.zeros((n, T), dtype=float)
 
     for i in range(n):
         c = last_close
         for t in range(T):
-            # drift + noise
-            noise = rng.normal(0.0, sigma / max(c, 1e-9)) * CFG.sim_noise_mult  # scale to return-ish
-            # 均值回歸（價格偏離 MA20 越多，越拉回）
-            mr = -CFG.mean_revert_strength * ((c - ma20) / max(ma20, 1e-9)) / 10.0
-
-            r = base_ret[t] + mr + noise
+            noise = rng.normal(0.0, sigma / max(c, 1e-9)) * float(CFG.sim_noise_mult)
+            mr = -float(CFG.mean_revert_strength) * ((c - ma20_target) / max(ma20_target, 1e-9)) / max(T, 1)
+            r = float(base_ret[t]) + float(mr) + float(noise)
             c = c * np.exp(r)
             paths[i, t] = c
 
-    # daily direction (+1 up, -1 down)
-    prev = np.r_[np.full((n, 1), last_close), paths[:, :-1]]
-    diff = paths - prev
-    sign = np.where(diff >= 0, 1, -1)  # (n, T)
+    # safe prev concat: (n,1) + (n,T-1) => (n,T)
+    if T == 1:
+        prev = np.full((n, 1), last_close, dtype=float)
+    else:
+        prev = np.concatenate([np.full((n, 1), last_close, dtype=float), paths[:, :-1]], axis=1)
 
-    # probability of all-up / all-down
+    diff = paths - prev
+    sign = np.where(diff >= 0, 1, -1).astype(int)
+
     p_all_up = float(np.mean(np.all(sign == 1, axis=1)) * 100.0)
     p_all_dn = float(np.mean(np.all(sign == -1, axis=1)) * 100.0)
 
-    # turn probability based on sign change
-    turn_up_to_dn = np.zeros(T, dtype=float)  # day t: sign(t-1)=+ and sign(t)=- (t>=1)
-    turn_dn_to_up = np.zeros(T, dtype=float)
-
+    # direction turning probabilities
+    up_to_dn = np.zeros(T, dtype=float)
+    dn_to_up = np.zeros(T, dtype=float)
     for t in range(1, T):
-        turn_up_to_dn[t] = float(np.mean((sign[:, t-1] == 1) & (sign[:, t] == -1)) * 100.0)
-        turn_dn_to_up[t] = float(np.mean((sign[:, t-1] == -1) & (sign[:, t] == 1)) * 100.0)
+        up_to_dn[t] = float(np.mean((sign[:, t-1] == 1) & (sign[:, t] == -1)) * 100.0)
+        dn_to_up[t] = float(np.mean((sign[:, t-1] == -1) & (sign[:, t] == 1)) * 100.0)
 
-    # RSI+BB turning probability (top/bottom)
-    # 定義：
-    #   Top day t: (RSI>70 or Close>BB_high) AND next day down
-    #   Bottom day t: (RSI<30 or Close<BB_low) AND next day up
+    # RSI+BB turning probabilities (top/bottom)
     top_prob = np.zeros(T, dtype=float)
     bot_prob = np.zeros(T, dtype=float)
 
-    hist_tail = df_raw["Close"].astype(float).tail(120).copy()
+    hist_tail = hist_close.tail(120).copy()
 
-    for t in range(T-1):  # needs t+1
+    for t in range(T - 1):  # need next day
         top_hits = 0
         bot_hits = 0
+
         for i in range(n):
-            sim_close = pd.concat([hist_tail, pd.Series(paths[i, :t+1], index=future_dates[:t+1])], axis=0)
-            rsi, bb_h, bb_l = compute_rsi_and_bbands(sim_close)
+            sim_close = pd.concat(
+                [hist_tail, pd.Series(paths[i, :t+1], index=future_dates[:t+1])],
+                axis=0
+            )
+
+            rsi, bb_h, bb_l = compute_rsi_bbands(sim_close)
 
             c_t = float(sim_close.iloc[-1])
             rsi_t = float(rsi.iloc[-1]) if not np.isnan(rsi.iloc[-1]) else 50.0
@@ -375,22 +375,21 @@ def simulate_paths_and_turning(df_raw: pd.DataFrame, future_dates, base_preds, s
             overbought = (rsi_t >= CFG.rsi_hi) or (c_t >= bh_t)
             oversold = (rsi_t <= CFG.rsi_lo) or (c_t <= bl_t)
 
-            next_move_down = paths[i, t+1] < paths[i, t]
-            next_move_up = paths[i, t+1] > paths[i, t]
+            next_down = paths[i, t+1] < paths[i, t]
+            next_up = paths[i, t+1] > paths[i, t]
 
-            if overbought and next_move_down:
+            if overbought and next_down:
                 top_hits += 1
-            if oversold and next_move_up:
+            if oversold and next_up:
                 bot_hits += 1
 
         top_prob[t] = top_hits / n * 100.0
         bot_prob[t] = bot_hits / n * 100.0
 
-    # build summary tables
     turn_df = pd.DataFrame({
         "日期": [d.date() for d in future_dates],
-        "由漲轉跌機率(%)": np.round(turn_up_to_dn, 1),
-        "由跌轉漲機率(%)": np.round(turn_dn_to_up, 1),
+        "由漲轉跌機率(%)": np.round(up_to_dn, 1),
+        "由跌轉漲機率(%)": np.round(dn_to_up, 1),
         "可能高點(%)_RSI+BB": np.round(top_prob, 1),
         "可能低點(%)_RSI+BB": np.round(bot_prob, 1),
     })
@@ -407,15 +406,13 @@ def simulate_paths_and_turning(df_raw: pd.DataFrame, future_dates, base_preds, s
 # UI helpers
 # =========================
 def pick_top_days(df: pd.DataFrame, col: str, topk: int = 3):
-    tmp = df.copy()
-    tmp = tmp.sort_values(col, ascending=False).head(topk)
+    tmp = df.sort_values(col, ascending=False).head(topk)
     return tmp[["日期", col]]
 
 def plot_history_and_pred(df_raw: pd.DataFrame, future_dates, preds):
     hist = df_raw[["Close"]].tail(120).copy()
     fut = pd.DataFrame({"Close": preds}, index=future_dates)
-    merged = pd.concat([hist, fut], axis=0)
-    return merged
+    return pd.concat([hist, fut], axis=0)
 
 def plot_k_with_forecast(df_raw: pd.DataFrame, future_dates, preds, lo=None, hi=None):
     if not HAS_PLOTLY:
@@ -447,26 +444,23 @@ def plot_k_with_forecast(df_raw: pd.DataFrame, future_dates, preds, lo=None, hi=
 
 
 # =========================
-# Main app
+# Streamlit App
 # =========================
 st.set_page_config(page_title="AI 10日趨勢判定（RSI+布林轉折）", layout="wide", page_icon="📈")
 
-st.title("📈 AI 10日趨勢判定（不只預測價格：含轉折機率、單邊機率、可能高低點）")
-st.caption("核心：10日遞迴預測 + 多情境模擬（像天氣預報） + 轉折判定（RSI + 布林帶）。")
+st.title("📈 AI 10日趨勢判定（含轉折機率、可能高低點、單邊機率）")
+st.caption("這版不是只吐10個價格：會告訴你『可能漲到哪天、可能跌到哪天』的機率。")
 
 with st.sidebar:
     st.header("⚙️ 設定")
     data_source = st.radio("資料來源", ["自動下載 (yfinance)", "手動貼上CSV資料"])
 
     show_interval = st.checkbox("顯示預測區間（約80%）", value=True)
-    show_plotly = st.checkbox("使用 Plotly K 線圖（需安裝 plotly）", value=True)
-    sim_paths = st.slider("多情境路徑數（越多越穩但越慢）", 50, 400, CFG.sim_paths, 50)
-    mean_revert = st.slider("均值回歸強度（越高越不易10天單邊）", 0.0, 0.8, CFG.mean_revert_strength, 0.05)
-    noise_mult = st.slider("模擬噪音倍率（越高越發散）", 0.3, 2.0, CFG.sim_noise_mult, 0.1)
+    show_plotly = st.checkbox("使用 Plotly K 線圖（需 plotly）", value=True)
 
-    CFG.sim_paths = int(sim_paths)
-    CFG.mean_revert_strength = float(mean_revert)
-    CFG.sim_noise_mult = float(noise_mult)
+    CFG.sim_paths = st.slider("多情境路徑數", 50, 400, CFG.sim_paths, 50)
+    CFG.mean_revert_strength = st.slider("均值回歸強度", 0.0, 0.8, CFG.mean_revert_strength, 0.05)
+    CFG.sim_noise_mult = st.slider("模擬噪音倍率", 0.3, 2.0, CFG.sim_noise_mult, 0.1)
 
     if data_source == "自動下載 (yfinance)":
         code = st.text_input("股票代號（台股輸入 2330、美股 AAPL）", "2330").strip()
@@ -475,16 +469,17 @@ with st.sidebar:
         code = code.upper()
 
         lookback_days = st.selectbox("訓練資料量（越多越穩、越慢）", [600, 900, 1200, 1600, 2000], index=2)
+
         st.divider()
         st.write(f"預測交易日數：**{CFG.forecast_days}**")
-        st.write(f"台股交易日曆：{'已啟用(XTAI)' if HAS_TW_CAL else '未安裝（不影響核心判定）'}")
+        st.write(f"台股交易日曆：{'已啟用(XTAI)' if HAS_TW_CAL else '未安裝（不影響）'}")
     else:
-        st.info("手動 CSV 需含 Date, Open, High, Low, Close, Volume 欄位。")
+        st.info("CSV 需含 Date, Open, High, Low, Close, Volume 欄位。")
 
 run_btn = st.button("🚀 開始分析", type="primary", use_container_width=True)
 
 if run_btn:
-    # -------- load data --------
+    # ===== load data =====
     if data_source == "手動貼上CSV資料":
         manual = st.text_area("貼上 CSV（需含 Date, Open, High, Low, Close, Volume）", height=240)
         if not manual.strip():
@@ -497,19 +492,18 @@ if run_btn:
         except Exception as e:
             st.error(f"CSV 解析失敗：{e}")
             st.stop()
-        status = "手動資料"
     else:
-        status = market_status(code)
-        st.info(f"市場狀態：**{status}**（提示用；本系統基於日線資料）")
+        st.info(f"市場狀態：**{market_status(code)}**（提示用；預測基於日線資料）")
         end = pd.Timestamp(datetime.today().date()) + pd.Timedelta(days=1)
         start = end - pd.Timedelta(days=int(lookback_days))
+
         with st.spinner("下載資料中..."):
             df_raw = safe_download(code, start, end)
         if df_raw.empty:
             st.error("資料下載失敗，請檢查代號或網路。")
             st.stop()
 
-    # -------- build features --------
+    # ===== features =====
     df_guard = add_guard_indicators_real(df_raw)
     df_feat = add_model_features(df_raw)
 
@@ -517,7 +511,7 @@ if run_btn:
         st.error("有效樣本不足：請調高訓練資料量或換標的。")
         st.stop()
 
-    # -------- train ensemble --------
+    # ===== train =====
     with st.spinner("訓練 Ensemble + 計算殘差波動中..."):
         X = df_feat[FEATURES].values
         y = df_feat["Close"].values
@@ -525,11 +519,10 @@ if run_btn:
         y_pred = ensemble_predict(models, weights, X)
         sigma = estimate_sigma(y, y_pred)
 
-    # -------- forecast 10 days --------
+    # ===== forecast =====
     with st.spinner("進行 10 日遞迴預測中..."):
-        future_dates, last_close, base_preds = forecast_10_days_recursive(models, weights, df_feat, df_raw, df_guard)
+        future_dates, last_close, base_preds = forecast_recursive(models, weights, df_feat, df_raw, df_guard)
 
-    # interval for base forecast
     base_hi = [p + CFG.interval_z * sigma for p in base_preds]
     base_lo = [p - CFG.interval_z * sigma for p in base_preds]
 
@@ -541,32 +534,30 @@ if run_btn:
         "區間上界(約80%)": np.round(base_hi, 2),
     })
 
-    # -------- simulate multi paths + turning probabilities --------
+    # ===== simulate + turning =====
     with st.spinner("多情境路徑模擬 + 轉折機率統計中..."):
         paths, sign, turn_df, summary = simulate_paths_and_turning(df_raw, future_dates, base_preds, sigma)
 
-    # -------- display summary --------
+    # ===== output =====
     st.subheader("📌 模型摘要")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("最後收盤價", f"{last_close:.2f}")
     c2.metric("CV MAE (HGB)", f"{cv_mae.get('HGB', np.nan):.3f}")
     c3.metric("CV MAE (RF)", f"{cv_mae.get('RF', np.nan):.3f}")
-    c4.metric("殘差波動 sigma", f"{sigma:.4f}")
+    c4.metric("sigma（殘差波動）", f"{sigma:.4f}")
 
     st.write(f"權重：HGB **{weights.get('HGB', 0):.2f}**｜RF **{weights.get('RF', 0):.2f}**")
 
     st.subheader("🔮 10 個交易日預測（基準路徑）")
-    if show_interval:
-        st.dataframe(result_df, use_container_width=True)
-    else:
-        st.dataframe(result_df.drop(columns=["區間下界(約80%)", "區間上界(約80%)"]), use_container_width=True)
+    st.dataframe(result_df if show_interval else result_df.drop(columns=["區間下界(約80%)", "區間上界(約80%)"]),
+                 use_container_width=True)
 
-    st.subheader("🧠 你要的『判定』：單邊機率 + 轉折日 + 可能高低點")
+    st.subheader("🧠 趨勢判定：單邊機率 / 轉折日 / 可能高低點（RSI+布林）")
     c5, c6 = st.columns(2)
     c5.metric("連漲10天機率", f"{summary['連漲10天機率(%)']:.2f}%")
     c6.metric("連跌10天機率", f"{summary['連跌10天機率(%)']:.2f}%")
 
-    st.markdown("**轉折（方向翻轉）Top 3**")
+    st.markdown("**方向轉折 Top 3（由漲轉跌 / 由跌轉漲）**")
     t1, t2 = st.columns(2)
     with t1:
         st.write("由漲轉跌機率最高日：")
@@ -575,7 +566,7 @@ if run_btn:
         st.write("由跌轉漲機率最高日：")
         st.table(pick_top_days(turn_df, "由跌轉漲機率(%)", 3))
 
-    st.markdown("**可能高點 / 低點（RSI + 布林帶觸發後，次日反轉）Top 3**")
+    st.markdown("**技術面轉折 Top 3（RSI + 布林帶）**")
     b1, b2 = st.columns(2)
     with b1:
         st.write("可能高點：")
@@ -584,7 +575,7 @@ if run_btn:
         st.write("可能低點：")
         st.table(pick_top_days(turn_df, "可能低點(%)_RSI+BB", 3))
 
-    st.subheader("📊 轉折機率明細（10 天逐日）")
+    st.subheader("📊 轉折機率明細（10天逐日）")
     st.dataframe(turn_df, use_container_width=True)
 
     st.subheader("📈 走勢（歷史 + 預測）")
