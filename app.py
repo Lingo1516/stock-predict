@@ -41,17 +41,13 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 
 import ta
 
-
 # =========================
 # Config
 # =========================
 @dataclass
 class Config:
-    forecast_days: int = 10              # ✅ 你要 10 天
-    min_train_rows: int = 240            # 有效樣本不足就不跑
-
-    # 訓練資料長度（天）
-    default_lookback_days: int = 1200
+    forecast_days: int = 10
+    min_train_rows: int = 240
 
     # 預測護欄：用真實歷史 MA20/ATR 限制預測範圍，避免爆走
     atr_period: int = 14
@@ -70,14 +66,13 @@ class Config:
     sim_noise_mult: float = 1.0
     mean_revert_strength: float = 0.25
 
-    # Turning rules (RSI + Bollinger)  ✅ C
+    # Turning rules (RSI + Bollinger)
     rsi_hi: float = 70.0
     rsi_lo: float = 30.0
     bb_window: int = 20
     bb_std: float = 2.0
 
 CFG = Config()
-
 
 # =========================
 # Utils
@@ -116,7 +111,6 @@ def market_status(code: str) -> str:
         return "已收盤(推測)"
     return "日線資料(不判斷盤中)"
 
-
 # =========================
 # Feature Engineering (recursive-friendly)
 # =========================
@@ -133,7 +127,6 @@ def add_guard_indicators_real(df_raw: pd.DataFrame) -> pd.DataFrame:
     df = df_raw.copy()
     close = df["Close"].astype(float)
     df["MA20"] = close.rolling(20).mean()
-
     atr = ta.volatility.AverageTrueRange(df["High"], df["Low"], close, window=CFG.atr_period)
     df["ATR"] = atr.average_true_range()
     return df.dropna().copy()
@@ -193,7 +186,6 @@ def compute_next_feature_row(close_hist: list[float], vol_hist: list[float]) -> 
 
     return np.array([[ret1, ret5, ma5, ma10, ma20, ma60, rsi, vol20, volchg]], dtype="float64")
 
-
 # =========================
 # Ensemble + CV weighting
 # =========================
@@ -250,7 +242,6 @@ def estimate_sigma(y_true: np.ndarray, y_pred: np.ndarray) -> float:
         resid = resid[-80:]
     return float(np.std(resid))
 
-
 # =========================
 # 10-day recursive forecast
 # =========================
@@ -285,7 +276,6 @@ def forecast_recursive(models, weights, df_feat: pd.DataFrame, df_raw: pd.DataFr
 
     return future_dates, last_close, preds
 
-
 # =========================
 # RSI + Bollinger helpers
 # =========================
@@ -296,26 +286,25 @@ def compute_rsi_bbands(close_series: pd.Series):
     bb_l = bb.bollinger_lband()
     return rsi, bb_h, bb_l
 
-
 # =========================
-# Scenario simulation + turning stats
-# (NO np.r_ here; use concatenate safely)
+# Scenario simulation + turning stats (safe concat, no np.r_ for 2D)
 # =========================
 def simulate_paths_and_turning(df_raw: pd.DataFrame, future_dates, base_preds, sigma: float):
     T = int(len(base_preds))
     n = int(CFG.sim_paths)
+
+    last_close = float(df_raw["Close"].iloc[-1])
+    hist_close = df_raw["Close"].astype(float)
 
     if T <= 0:
         turn_df = pd.DataFrame(columns=["日期", "由漲轉跌機率(%)", "由跌轉漲機率(%)", "可能高點(%)_RSI+BB", "可能低點(%)_RSI+BB"])
         summary = {"連漲10天機率(%)": 0.0, "連跌10天機率(%)": 0.0}
         return np.zeros((n, 0)), np.zeros((n, 0), dtype=int), turn_df, summary
 
-    last_close = float(df_raw["Close"].iloc[-1])
-
-    hist_close = df_raw["Close"].astype(float)
     ma20_target = float(hist_close.tail(20).mean()) if len(hist_close) >= 20 else float(hist_close.mean())
 
     base = np.array(base_preds, dtype=float)
+    # 這裡是 1D safe：np.r_ 用在 1D 沒問題
     base_ret = np.diff(np.log(np.r_[last_close, base]))  # length T
 
     rng = np.random.default_rng(42)
@@ -330,7 +319,7 @@ def simulate_paths_and_turning(df_raw: pd.DataFrame, future_dates, base_preds, s
             c = c * np.exp(r)
             paths[i, t] = c
 
-    # safe prev concat: (n,1) + (n,T-1) => (n,T)
+    # prev shape: (n, T)
     if T == 1:
         prev = np.full((n, 1), last_close, dtype=float)
     else:
@@ -342,29 +331,25 @@ def simulate_paths_and_turning(df_raw: pd.DataFrame, future_dates, base_preds, s
     p_all_up = float(np.mean(np.all(sign == 1, axis=1)) * 100.0)
     p_all_dn = float(np.mean(np.all(sign == -1, axis=1)) * 100.0)
 
-    # direction turning probabilities
     up_to_dn = np.zeros(T, dtype=float)
     dn_to_up = np.zeros(T, dtype=float)
     for t in range(1, T):
         up_to_dn[t] = float(np.mean((sign[:, t-1] == 1) & (sign[:, t] == -1)) * 100.0)
         dn_to_up[t] = float(np.mean((sign[:, t-1] == -1) & (sign[:, t] == 1)) * 100.0)
 
-    # RSI+BB turning probabilities (top/bottom)
     top_prob = np.zeros(T, dtype=float)
     bot_prob = np.zeros(T, dtype=float)
 
     hist_tail = hist_close.tail(120).copy()
 
-    for t in range(T - 1):  # need next day
+    for t in range(T - 1):  # needs next day
         top_hits = 0
         bot_hits = 0
-
         for i in range(n):
             sim_close = pd.concat(
                 [hist_tail, pd.Series(paths[i, :t+1], index=future_dates[:t+1])],
                 axis=0
             )
-
             rsi, bb_h, bb_l = compute_rsi_bbands(sim_close)
 
             c_t = float(sim_close.iloc[-1])
@@ -401,9 +386,140 @@ def simulate_paths_and_turning(df_raw: pd.DataFrame, future_dates, base_preds, s
 
     return paths, sign, turn_df, summary
 
+# =========================
+# Decision Summary Engine (你要的：人話結論 + 哪天買賣 + 強度 + 買多少)
+# =========================
+def _clip_0_100(x: float) -> float:
+    return float(max(0.0, min(100.0, x)))
+
+def generate_trade_summary(
+    turn_df: pd.DataFrame,
+    result_df: pd.DataFrame,
+    last_close: float,
+    atr: float,
+    capital: float,
+    risk_pct: float
+):
+    """
+    依 turn_df + 預測表 + ATR 產生：
+    - 結論（偏多/偏空/盤整）
+    - Buy/Sell Strength（0~100）
+    - 最佳買點日 / 最佳賣點日
+    - 建議股數（依風險與停損）
+    """
+    # ---- safety ----
+    if turn_df is None or turn_df.empty or result_df is None or result_df.empty or atr <= 0:
+        return {
+            "bias": "資料不足",
+            "buy_strength": 0.0,
+            "sell_strength": 0.0,
+            "best_buy_day": "N/A",
+            "best_sell_day": "N/A",
+            "shares": 0,
+            "stop_price": 0.0,
+            "summary_text": "資料不足，無法產生交易結論。"
+        }
+
+    # 預期報酬（以每一天預測價相對 last_close）
+    pred_ret_pct = (result_df["預測價"].astype(float) / float(last_close) - 1.0) * 100.0
+
+    # Buy / Sell 分數（你要的質性+量化）
+    buy_scores = (
+        0.45 * turn_df["由跌轉漲機率(%)"].astype(float) +
+        0.35 * turn_df["可能低點(%)_RSI+BB"].astype(float) +
+        0.20 * pred_ret_pct.clip(lower=0.0)
+    )
+
+    sell_scores = (
+        0.45 * turn_df["由漲轉跌機率(%)"].astype(float) +
+        0.35 * turn_df["可能高點(%)_RSI+BB"].astype(float) +
+        0.20 * (-pred_ret_pct).clip(lower=0.0)
+    )
+
+    buy_strength = _clip_0_100(float(buy_scores.max()))
+    sell_strength = _clip_0_100(float(sell_scores.max()))
+
+    # 偏多/偏空/盤整
+    if buy_strength > sell_strength + 15:
+        bias = "偏多"
+    elif sell_strength > buy_strength + 15:
+        bias = "偏空"
+    else:
+        bias = "盤整"
+
+    best_buy_idx = int(buy_scores.idxmax())
+    best_sell_idx = int(sell_scores.idxmax())
+
+    best_buy_day = str(result_df.loc[best_buy_idx, "日期"])
+    best_sell_day = str(result_df.loc[best_sell_idx, "日期"])
+
+    # 強度文字
+    def strength_label(x: float, side: str) -> str:
+        if x >= 75:
+            return f"強烈{side}"
+        if x >= 60:
+            return f"明確{side}"
+        if x >= 40:
+            return f"偏向{side}"
+        return "觀望"
+
+    buy_label = strength_label(buy_strength, "買進")
+    sell_label = strength_label(sell_strength, "賣出")
+
+    # 部位計算：風險金額 / 每股風險
+    risk_amount = float(capital) * float(risk_pct)
+    stop_price = float(last_close) - 2.5 * float(atr)
+    risk_per_share = max(float(last_close) - float(stop_price), 1e-6)
+    base_shares = int(risk_amount // risk_per_share)
+
+    # 用買進強度調倉位（你要的「趕快」強度對應到買多少）
+    if buy_strength >= 75:
+        shares = int(base_shares * 1.3)
+    elif buy_strength >= 60:
+        shares = int(base_shares * 1.0)
+    elif buy_strength >= 40:
+        shares = int(base_shares * 0.5)
+    else:
+        shares = 0
+
+    # 取出買點原因數字（最重要三個）
+    row_buy = turn_df.loc[best_buy_idx]
+    row_sell = turn_df.loc[best_sell_idx]
+
+    buy_dn2up = float(row_buy["由跌轉漲機率(%)"])
+    buy_bottom = float(row_buy["可能低點(%)_RSI+BB"])
+    sell_up2dn = float(row_sell["由漲轉跌機率(%)"])
+    sell_top = float(row_sell["可能高點(%)_RSI+BB"])
+
+    summary_text = (
+        f"【整體判斷】{bias}\n"
+        f"Buy Strength：{buy_strength:.0f}/100（{buy_label}）｜Sell Strength：{sell_strength:.0f}/100（{sell_label}）\n\n"
+        f"【最佳買點】{best_buy_day}\n"
+        f"- 由跌轉漲機率：{buy_dn2up:.1f}%\n"
+        f"- 可能低點(RSI+布林)：{buy_bottom:.1f}%\n\n"
+        f"【最佳賣點/風險日】{best_sell_day}\n"
+        f"- 由漲轉跌機率：{sell_up2dn:.1f}%\n"
+        f"- 可能高點(RSI+布林)：{sell_top:.1f}%\n\n"
+        f"【建議部位（依資金/風險/停損自動計算）】\n"
+        f"- 資金：{capital:,.0f}｜單筆風險：{risk_pct*100:.0f}%（{risk_amount:,.0f}）\n"
+        f"- 建議買進：{shares:,} 股\n"
+        f"- 建議停損價：約 {stop_price:.2f}（= 現價 - 2.5×ATR）\n\n"
+        f"【底線】跌破停損價 → 本次判斷失效，必須出場"
+    )
+
+    return {
+        "bias": bias,
+        "buy_strength": buy_strength,
+        "sell_strength": sell_strength,
+        "best_buy_day": best_buy_day,
+        "best_sell_day": best_sell_day,
+        "shares": shares,
+        "stop_price": stop_price,
+        "summary_text": summary_text
+    }
 
 # =========================
-# UI helpers
+# Plot helpers
 # =========================
 def pick_top_days(df: pd.DataFrame, col: str, topk: int = 3):
     tmp = df.sort_values(col, ascending=False).head(topk)
@@ -442,14 +558,12 @@ def plot_k_with_forecast(df_raw: pd.DataFrame, future_dates, preds, lo=None, hi=
     fig.update_layout(height=700, xaxis_rangeslider_visible=False, hovermode="x unified")
     return fig
 
-
 # =========================
 # Streamlit App
 # =========================
-st.set_page_config(page_title="AI 10日趨勢判定（RSI+布林轉折）", layout="wide", page_icon="📈")
-
-st.title("📈 AI 10日趨勢判定（含轉折機率、可能高低點、單邊機率）")
-st.caption("這版不是只吐10個價格：會告訴你『可能漲到哪天、可能跌到哪天』的機率。")
+st.set_page_config(page_title="AI 10日趨勢判定（含買賣結論）", layout="wide", page_icon="📈")
+st.title("📈 AI 10日趨勢判定（含買賣結論、強度、買多少、停損）")
+st.caption("這版會直接給你幾句結論：哪天買、哪天賣、強度多大、建議買多少（依資金100萬/風險10%計算）。")
 
 with st.sidebar:
     st.header("⚙️ 設定")
@@ -458,21 +572,27 @@ with st.sidebar:
     show_interval = st.checkbox("顯示預測區間（約80%）", value=True)
     show_plotly = st.checkbox("使用 Plotly K 線圖（需 plotly）", value=True)
 
+    st.divider()
+    st.subheader("💰 風控設定")
+    capital = st.number_input("資金", min_value=0.0, value=1_000_000.0, step=50_000.0)
+    risk_pct = st.slider("單筆風險 (%)", 0.1, 20.0, 10.0, 0.1) / 100.0
+
+    st.divider()
+    st.subheader("🧪 模擬設定")
     CFG.sim_paths = st.slider("多情境路徑數", 50, 400, CFG.sim_paths, 50)
     CFG.mean_revert_strength = st.slider("均值回歸強度", 0.0, 0.8, CFG.mean_revert_strength, 0.05)
     CFG.sim_noise_mult = st.slider("模擬噪音倍率", 0.3, 2.0, CFG.sim_noise_mult, 0.1)
 
+    st.divider()
     if data_source == "自動下載 (yfinance)":
         code = st.text_input("股票代號（台股輸入 2330、美股 AAPL）", "2330").strip()
         if code.isdigit():
             code = code + ".TW"
         code = code.upper()
-
         lookback_days = st.selectbox("訓練資料量（越多越穩、越慢）", [600, 900, 1200, 1600, 2000], index=2)
 
-        st.divider()
-        st.write(f"預測交易日數：**{CFG.forecast_days}**")
-        st.write(f"台股交易日曆：{'已啟用(XTAI)' if HAS_TW_CAL else '未安裝（不影響）'}")
+        st.write(f"市場狀態：{market_status(code)}（提示用；預測基於日線）")
+        st.write(f"預測交易日數：{CFG.forecast_days}")
     else:
         st.info("CSV 需含 Date, Open, High, Low, Close, Volume 欄位。")
 
@@ -493,10 +613,8 @@ if run_btn:
             st.error(f"CSV 解析失敗：{e}")
             st.stop()
     else:
-        st.info(f"市場狀態：**{market_status(code)}**（提示用；預測基於日線資料）")
         end = pd.Timestamp(datetime.today().date()) + pd.Timedelta(days=1)
         start = end - pd.Timedelta(days=int(lookback_days))
-
         with st.spinner("下載資料中..."):
             df_raw = safe_download(code, start, end)
         if df_raw.empty:
@@ -536,10 +654,29 @@ if run_btn:
 
     # ===== simulate + turning =====
     with st.spinner("多情境路徑模擬 + 轉折機率統計中..."):
-        paths, sign, turn_df, summary = simulate_paths_and_turning(df_raw, future_dates, base_preds, sigma)
+        paths, sign, turn_df, summary_prob = simulate_paths_and_turning(df_raw, future_dates, base_preds, sigma)
+
+    # ===== summary engine (你要的結論) =====
+    atr_val = float(df_guard["ATR"].iloc[-1]) if (df_guard is not None and not df_guard.empty and "ATR" in df_guard.columns) else 0.0
+    decision = generate_trade_summary(
+        turn_df=turn_df,
+        result_df=result_df,
+        last_close=float(last_close),
+        atr=float(atr_val),
+        capital=float(capital),
+        risk_pct=float(risk_pct)
+    )
 
     # ===== output =====
-    st.subheader("📌 模型摘要")
+    st.subheader("🧾 交易決策摘要（你要的結論就在這裡）")
+    st.success(decision["summary_text"])
+
+    cA, cB, cC = st.columns(3)
+    cA.metric("連漲10天機率", f"{summary_prob.get('連漲10天機率(%)', 0.0):.2f}%")
+    cB.metric("連跌10天機率", f"{summary_prob.get('連跌10天機率(%)', 0.0):.2f}%")
+    cC.metric("ATR（停損用）", f"{atr_val:.4f}" if atr_val > 0 else "N/A")
+
+    st.subheader("📌 模型摘要（參考用）")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("最後收盤價", f"{last_close:.2f}")
     c2.metric("CV MAE (HGB)", f"{cv_mae.get('HGB', np.nan):.3f}")
@@ -549,13 +686,13 @@ if run_btn:
     st.write(f"權重：HGB **{weights.get('HGB', 0):.2f}**｜RF **{weights.get('RF', 0):.2f}**")
 
     st.subheader("🔮 10 個交易日預測（基準路徑）")
-    st.dataframe(result_df if show_interval else result_df.drop(columns=["區間下界(約80%)", "區間上界(約80%)"]),
-                 use_container_width=True)
+    st.dataframe(
+        result_df if show_interval else result_df.drop(columns=["區間下界(約80%)", "區間上界(約80%)"]),
+        use_container_width=True
+    )
 
-    st.subheader("🧠 趨勢判定：單邊機率 / 轉折日 / 可能高低點（RSI+布林）")
-    c5, c6 = st.columns(2)
-    c5.metric("連漲10天機率", f"{summary['連漲10天機率(%)']:.2f}%")
-    c6.metric("連跌10天機率", f"{summary['連跌10天機率(%)']:.2f}%")
+    st.subheader("📊 轉折機率明細（10天逐日）")
+    st.dataframe(turn_df, use_container_width=True)
 
     st.markdown("**方向轉折 Top 3（由漲轉跌 / 由跌轉漲）**")
     t1, t2 = st.columns(2)
@@ -575,17 +712,16 @@ if run_btn:
         st.write("可能低點：")
         st.table(pick_top_days(turn_df, "可能低點(%)_RSI+BB", 3))
 
-    st.subheader("📊 轉折機率明細（10天逐日）")
-    st.dataframe(turn_df, use_container_width=True)
-
     st.subheader("📈 走勢（歷史 + 預測）")
     merged = plot_history_and_pred(df_raw, future_dates, base_preds)
     st.line_chart(merged)
 
     if show_plotly and HAS_PLOTLY:
-        fig = plot_k_with_forecast(df_raw, future_dates, base_preds,
-                                   base_lo if show_interval else None,
-                                   base_hi if show_interval else None)
+        fig = plot_k_with_forecast(
+            df_raw, future_dates, base_preds,
+            base_lo if show_interval else None,
+            base_hi if show_interval else None
+        )
         st.plotly_chart(fig, use_container_width=True)
     elif show_plotly and not HAS_PLOTLY:
         st.warning(f"未安裝 plotly：{PLOTLY_ERROR}")
