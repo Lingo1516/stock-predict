@@ -16,32 +16,26 @@ FORECAST_DAYS_DEFAULT = 10
 SIM_PATHS_DEFAULT = 600
 
 # ─────────────────────────────────────────────
-# 資料下載（自動嘗試 .TW 和 .TWO）
+# 資料下載（自動偵測上市 .TW / 上櫃 .TWO）
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def download_data(code: str, days: int = 1200) -> tuple[pd.DataFrame, str]:
-    """回傳 (DataFrame, 實際使用的代號)"""
     end   = datetime.now(TZ_TW).date() + timedelta(days=1)
     start = end - timedelta(days=days)
-
-    base = code.replace(".TW", "").replace(".TWO", "")
+    base  = code.replace(".TW", "").replace(".TWO", "")
     codes_to_try = [base + ".TW", base + ".TWO"] if base.isdigit() else [code]
 
     for c in codes_to_try:
-        for attempt in range(3):
+        for _ in range(3):
             try:
-                df = yf.download(
-                    c, start=start, end=end,
-                    auto_adjust=True, progress=False,
-                    timeout=15
-                )
+                df = yf.download(c, start=start, end=end,
+                                 auto_adjust=True, progress=False, timeout=15)
                 if df is not None and not df.empty:
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = [col[0] for col in df.columns]
                     return df.dropna().copy(), c
             except Exception:
                 continue
-
     return pd.DataFrame(), code
 
 
@@ -89,20 +83,16 @@ def simulate_paths(df, fdates, n_paths, mean_revert, noise_mult) -> np.ndarray:
     sigma  = float(df["SIGMA20"].iloc[-1])
     if not np.isfinite(sigma) or sigma <= 0:
         sigma = max(float(ret.tail(60).std()), 0.01)
-    ma20 = float(df["MA20"].iloc[-1])
-
-    T   = len(fdates)
-    rng = np.random.default_rng(42)
-    eps = rng.normal(0, sigma * noise_mult, size=(n_paths, T))
-
+    ma20   = float(df["MA20"].iloc[-1])
+    T      = len(fdates)
+    rng    = np.random.default_rng(42)
+    eps    = rng.normal(0, sigma * noise_mult, size=(n_paths, T))
     paths  = np.zeros((n_paths, T))
     prices = np.full(n_paths, last_p)
-
     for t in range(T):
         mr     = -mean_revert * ((prices - ma20) / max(ma20, 1e-9)) / max(T, 1)
         prices = prices * np.exp(drift + mr + eps[:, t])
         paths[:, t] = prices
-
     return paths
 
 
@@ -114,17 +104,12 @@ def find_turning_points(med: np.ndarray):
     d    = s.diff().fillna(0)
     sign = np.sign(d.values)
     sign[np.abs(d.values) < (np.nanstd(d.values) * 0.05 + 1e-12)] = 0
-
     valleys, peaks = [], []
     for t in range(1, len(sign) - 1):
-        if sign[t] < 0 and sign[t + 1] > 0:
-            valleys.append(t)
-        if sign[t] > 0 and sign[t + 1] < 0:
-            peaks.append(t)
-
+        if sign[t] < 0 and sign[t + 1] > 0: valleys.append(t)
+        if sign[t] > 0 and sign[t + 1] < 0: peaks.append(t)
     valley_idx = int(s.iloc[valleys].idxmin()) if valleys else None
     peak_idx   = int(s.iloc[peaks].idxmax())   if peaks   else None
-
     trend      = float(s.iloc[-1] - s.iloc[0])
     std_s      = float(np.nanstd(s.values))
     if valley_idx is None and peak_idx is None:
@@ -136,7 +121,6 @@ def find_turning_points(med: np.ndarray):
             trend_text = "這段看起來是『慢慢往下』，沒有明顯轉彎高點。"
     else:
         trend_text = ""
-
     return valley_idx, peak_idx, trend_text
 
 
@@ -147,24 +131,20 @@ def make_report(df, fdates, paths, capital, risk_pct):
     last_close = float(df["Close"].iloc[-1])
     atr        = float(df["ATR"].iloc[-1])
     rsi        = float(df["RSI"].iloc[-1])
-
-    med  = np.median(paths, axis=0)
-    p20  = np.percentile(paths, 20, axis=0)
-    p80  = np.percentile(paths, 80, axis=0)
-
-    prev        = np.concatenate([np.full((paths.shape[0], 1), last_close), paths[:, :-1]], axis=1)
-    up_prob     = (paths > prev).mean(axis=0) * 100.0
-    stop_price  = last_close - 2.5 * atr
-    hit_stop_p  = (paths <= stop_price).mean(axis=0) * 100.0
+    med        = np.median(paths, axis=0)
+    p20        = np.percentile(paths, 20, axis=0)
+    p80        = np.percentile(paths, 80, axis=0)
+    prev       = np.concatenate([np.full((paths.shape[0], 1), last_close), paths[:, :-1]], axis=1)
+    up_prob    = (paths > prev).mean(axis=0) * 100.0
+    stop_price = last_close - 2.5 * atr
+    hit_stop_p = (paths <= stop_price).mean(axis=0) * 100.0
 
     valley_idx, peak_idx, trend_text = find_turning_points(med)
-
     buy_day    = fdates[valley_idx].date() if valley_idx is not None else None
     sell_day   = fdates[peak_idx].date()   if peak_idx   is not None else None
     buy_action = "建議**分批小量買**（不要一次全買）" if buy_day  else "沒有明顯低點，建議**觀望或少量分批**"
     sell_action= "建議**先賣一部分收錢**"             if sell_day else "沒有明顯高點，用**停損線保護**就好"
 
-    # 停損命中
     first_hit    = np.full(paths.shape[0], -1, dtype=int)
     for i in range(paths.shape[0]):
         hits = np.where(paths[i] <= stop_price)[0]
@@ -177,10 +157,9 @@ def make_report(df, fdates, paths, capital, risk_pct):
     else:
         stop_text = f"碰到停損機率低（約 {hit_any_prob:.1f}%）"
 
-    # 建議股數
-    risk_money      = capital * risk_pct
-    per_share_risk  = max(last_close - stop_price, 1e-6)
-    shares          = int(risk_money // per_share_risk)
+    risk_money     = capital * risk_pct
+    per_share_risk = max(last_close - stop_price, 1e-6)
+    shares         = int(risk_money // per_share_risk)
 
     if 45 <= rsi <= 55:
         shares_suggest = 0
@@ -199,7 +178,7 @@ def make_report(df, fdates, paths, capital, risk_pct):
         action_line    = f"中性偏向，**最多買 {shares:,} 股**"
         mood_emoji     = "🟡"
 
-    mood = (
+    mood  = (
         "最近跌得比較多，有機會反彈，但也可能繼續晃。" if rsi < 35 else
         "最近漲得比較多，要小心突然回頭跌。"           if rsi > 65 else
         "最近不上不下，常常來回晃。"
@@ -214,7 +193,6 @@ def make_report(df, fdates, paths, capital, risk_pct):
         "rsi": rsi, "last_close": last_close, "atr": atr,
         "shares_suggest": shares_suggest,
     }
-
     table = pd.DataFrame({
         "日期":             [d.date() for d in fdates],
         "可能價格(中間值)": np.round(med, 2),
@@ -223,14 +201,13 @@ def make_report(df, fdates, paths, capital, risk_pct):
         "上漲機率(%)":      np.round(up_prob, 1),
         "碰到停損機率(%)":  np.round(hit_stop_p, 1),
     })
-
     return sd, table, stop_price, med, p20, p80
 
 
 # ─────────────────────────────────────────────
-# Plotly 互動圖
+# 歷史 + 預測走勢圖（含 RSI）
 # ─────────────────────────────────────────────
-def build_chart(df, fdates, med, p20, p80, stop_price):
+def build_main_chart(df, fdates, med, p20, p80, stop_price):
     hist       = df[["Close", "MA20", "MA60"]].tail(80).copy()
     hist.index = pd.to_datetime(hist.index).tz_localize(None)
     fdates_ts  = [pd.Timestamp(d) for d in fdates]
@@ -238,16 +215,14 @@ def build_chart(df, fdates, med, p20, p80, stop_price):
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.72, 0.28], vertical_spacing=0.05,
-        subplot_titles=("股價走勢 + 未來預測", "RSI(14)")
+        subplot_titles=("📈 股價走勢 + 未來預測", "RSI(14)")
     )
-
     fig.add_trace(go.Scatter(x=hist.index, y=hist["Close"],
         name="歷史收盤", line=dict(color="#4A90D9", width=2)), row=1, col=1)
     fig.add_trace(go.Scatter(x=hist.index, y=hist["MA20"],
         name="MA20", line=dict(color="#FFA500", width=1.2, dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=hist.index, y=hist["MA60"],
         name="MA60", line=dict(color="#9B59B6", width=1.2, dash="dot")), row=1, col=1)
-
     fig.add_trace(go.Scatter(
         x=fdates_ts + fdates_ts[::-1],
         y=list(p80) + list(p20[::-1]),
@@ -261,9 +236,9 @@ def build_chart(df, fdates, med, p20, p80, stop_price):
         name=f"停損線 {stop_price:.2f}",
         line=dict(color="#E74C3C", width=1.5, dash="longdash")), row=1, col=1)
 
-    rsi_series = df["RSI"].tail(80)
-    rsi_index  = pd.to_datetime(rsi_series.index).tz_localize(None)
-    fig.add_trace(go.Scatter(x=rsi_index, y=rsi_series,
+    rsi_s = df["RSI"].tail(80)
+    fig.add_trace(go.Scatter(
+        x=pd.to_datetime(rsi_s.index).tz_localize(None), y=rsi_s,
         name="RSI(14)", line=dict(color="#E67E22", width=1.5)), row=2, col=1)
     fig.add_hline(y=70, line_dash="dash", line_color="rgba(231,76,60,0.4)",  row=2, col=1)
     fig.add_hline(y=30, line_dash="dash", line_color="rgba(39,174,96,0.4)",  row=2, col=1)
@@ -278,20 +253,101 @@ def build_chart(df, fdates, med, p20, p80, stop_price):
 
 
 # ─────────────────────────────────────────────
+# 每日預測視覺化圖（取代表格）
+# ─────────────────────────────────────────────
+def build_forecast_chart(table):
+    dates      = [str(d) for d in table["日期"].values]
+    med_vals   = table["可能價格(中間值)"].values
+    p20_vals   = table["可能範圍_低(20%)"].values
+    p80_vals   = table["可能範圍_高(80%)"].values
+    up_vals    = table["上漲機率(%)"].values
+    stop_vals  = table["碰到停損機率(%)"].values
+
+    bar_colors = [
+        "#27AE60" if v >= 55 else "#F39C12" if v >= 45 else "#E74C3C"
+        for v in up_vals
+    ]
+    stop_colors = [
+        "#E74C3C" if v >= 10 else "#F39C12" if v >= 3 else "#27AE60"
+        for v in stop_vals
+    ]
+
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        row_heights=[0.5, 0.25, 0.25],
+        vertical_spacing=0.06,
+        subplot_titles=("💰 預測價格區間", "⬆️ 明天漲機率 (%)", "🛑 碰到停損機率 (%)")
+    )
+
+    # Row 1：價格帶狀區間
+    fig.add_trace(go.Scatter(
+        x=dates + dates[::-1],
+        y=list(p80_vals) + list(p20_vals[::-1]),
+        fill="toself", fillcolor="rgba(100,180,255,0.18)",
+        line=dict(color="rgba(0,0,0,0)"),
+        name="價格區間（最壞～最好）", hoverinfo="skip"
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=p80_vals, mode="lines",
+        line=dict(color="rgba(100,180,255,0.5)", width=1, dash="dot"),
+        name="最好情況(80%)"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=p20_vals, mode="lines",
+        line=dict(color="rgba(255,120,120,0.5)", width=1, dash="dot"),
+        name="最壞情況(20%)"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=med_vals, mode="lines+markers",
+        line=dict(color="#F1C40F", width=2.5),
+        marker=dict(size=7, color="#F1C40F"),
+        name="預測中間值",
+        hovertemplate="<b>%{x}</b><br>預測價：%{y:,.2f}<extra></extra>"
+    ), row=1, col=1)
+
+    # Row 2：上漲機率 bar
+    fig.add_trace(go.Bar(
+        x=dates, y=up_vals,
+        marker_color=bar_colors,
+        name="上漲機率",
+        text=[f"{v:.1f}%" for v in up_vals],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>上漲機率：%{y:.1f}%<extra></extra>"
+    ), row=2, col=1)
+    fig.add_hline(y=55, line_dash="dash", line_color="rgba(39,174,96,0.5)",  row=2, col=1)
+    fig.add_hline(y=45, line_dash="dash", line_color="rgba(231,76,60,0.5)",  row=2, col=1)
+
+    # Row 3：停損機率 bar
+    fig.add_trace(go.Bar(
+        x=dates, y=stop_vals,
+        marker_color=stop_colors,
+        name="碰停損機率",
+        text=[f"{v:.1f}%" for v in stop_vals],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>碰停損機率：%{y:.1f}%<extra></extra>"
+    ), row=3, col=1)
+    fig.add_hline(y=10, line_dash="dash", line_color="rgba(231,76,60,0.5)",  row=3, col=1)
+    fig.add_hline(y=3,  line_dash="dash", line_color="rgba(243,156,18,0.5)", row=3, col=1)
+
+    fig.update_layout(
+        height=680, template="plotly_dark",
+        legend=dict(orientation="h", y=-0.06, x=0),
+        margin=dict(l=40, r=20, t=45, b=20),
+        hovermode="x unified",
+        bargap=0.35,
+    )
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.07)")
+    return fig
+
+
+# ─────────────────────────────────────────────
 # Streamlit UI
 # ─────────────────────────────────────────────
 st.set_page_config(
     page_title="📘 股票助手（優化版）",
     layout="wide", page_icon="📘"
 )
-
 st.title("📘 股票助手｜低點 / 高點預測 + 風控建議")
 st.caption("👆 看三件事：**要不要買** → **低點日怎麼買** → **高點日怎麼賣**")
 
 with st.sidebar:
     st.header("⚙️ 設定")
-    code_raw = st.text_input("股票代號（台股輸入數字即可）", "2330").strip()
-    # 移除舊後綴，讓程式自動判斷
+    code_raw   = st.text_input("股票代號（台股輸入數字即可）", "2330").strip()
     code_input = code_raw.replace(".TW", "").replace(".TWO", "").upper()
 
     st.divider()
@@ -314,7 +370,6 @@ if run_btn:
         st.error("❌ 抓不到資料，請確認代號是否正確。")
         st.stop()
 
-    # 顯示實際使用的代號
     market_label = "上櫃（OTC）" if used_code.endswith(".TWO") else "上市（TWSE）"
     st.success(f"✅ 成功抓到資料：**{used_code}**（{market_label}）")
 
@@ -329,7 +384,7 @@ if run_btn:
 
     sd, table, stop_price, med, p20, p80 = make_report(df, fdates, paths, capital, risk_pct)
 
-    # 指標卡片
+    # ── 指標卡片 ──
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("現價",    f"{sd['last_close']:.2f}")
     c2.metric("RSI(14)", f"{sd['rsi']:.1f}",
@@ -341,6 +396,7 @@ if run_btn:
 
     st.divider()
 
+    # ── 結論 ──
     st.subheader(f"{sd['mood_emoji']} 一句話結論")
     st.info(f"{sd['mood']}\n\n**操作建議：** {sd['action_line']}")
 
@@ -363,16 +419,32 @@ if run_btn:
 
     st.divider()
 
-    st.subheader("📈 互動圖表（可縮放 / 懸停查看數字）")
-    fig = build_chart(df, fdates, med, p20, p80, stop_price)
-    st.plotly_chart(fig, use_container_width=True)
+    # ── 歷史走勢圖 ──
+    st.subheader("📈 歷史走勢 + 未來預測（可縮放/懸停）")
+    st.plotly_chart(build_main_chart(df, fdates, med, p20, p80, stop_price),
+                    use_container_width=True)
 
-    st.subheader("📊 每日預測數字")
-    st.dataframe(
-        table.style
-             .background_gradient(subset=["上漲機率(%)"],     cmap="RdYlGn")
-             .background_gradient(subset=["碰到停損機率(%)"], cmap="RdYlGn_r"),
-        use_container_width=True
-    )
+    st.divider()
+
+    # ── 每日預測視覺化 ──
+    st.subheader("📊 每日預測數字（視覺化）")
+    st.plotly_chart(build_forecast_chart(table), use_container_width=True)
+
+    # 圖例說明
+    leg1, leg2 = st.columns(2)
+    with leg1:
+        st.markdown("**⬆️ 上漲機率圖例**")
+        st.markdown("""
+🟢 **綠色（≥55%）** 偏漲，今天比較可能往上  
+🟡 **黃色（45~55%）** 持平，方向不確定  
+🔴 **紅色（<45%）** 偏跌，今天比較可能往下  
+""")
+    with leg2:
+        st.markdown("**🛑 碰停損機率圖例**")
+        st.markdown("""
+✅ **綠色（<3%）** 安全，今天很少路徑會跌破停損  
+⚠️ **橘色（3~10%）** 偏高，要稍微注意  
+🚨 **紅色（≥10%）** 危險，比較多路徑會碰到停損  
+""")
 
     st.caption("⚠️ 免責聲明：此工具僅供輔助思考，不構成投資建議，請自行評估風險。")
