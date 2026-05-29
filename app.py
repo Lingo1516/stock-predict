@@ -8,6 +8,13 @@ import ta
 import warnings
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy.stats import t as t_dist
+
+try:
+    from arch import arch_model
+    HAS_ARCH = True
+except ImportError:
+    HAS_ARCH = False
 
 warnings.filterwarnings("ignore")
 
@@ -46,40 +53,31 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     low   = df["Low"].astype(float)
     vol   = df["Volume"].astype(float)
 
-    # 均線
     df["MA20"] = close.rolling(20).mean()
     df["MA60"] = close.rolling(60).mean()
     df["EMA12"] = close.ewm(span=12, adjust=False).mean()
     df["EMA26"] = close.ewm(span=26, adjust=False).mean()
 
-    # RSI
     df["RSI"] = ta.momentum.RSIIndicator(close, window=14).rsi()
 
-    # MACD
-    macd_ind     = ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
-    df["MACD"]   = macd_ind.macd()
+    macd_ind          = ta.trend.MACD(close, window_slow=26, window_fast=12, window_sign=9)
+    df["MACD"]        = macd_ind.macd()
     df["MACD_signal"] = macd_ind.macd_signal()
     df["MACD_hist"]   = macd_ind.macd_diff()
 
-    # KD（隨機指標）
-    stoch        = ta.momentum.StochasticOscillator(high, low, close, window=9, smooth_window=3)
-    df["K"]      = stoch.stoch()
-    df["D"]      = stoch.stoch_signal()
+    stoch    = ta.momentum.StochasticOscillator(high, low, close, window=9, smooth_window=3)
+    df["K"]  = stoch.stoch()
+    df["D"]  = stoch.stoch_signal()
 
-    # 布林通道
-    bb           = ta.volatility.BollingerBands(close, window=20, window_dev=2)
+    bb             = ta.volatility.BollingerBands(close, window=20, window_dev=2)
     df["BB_upper"] = bb.bollinger_hband()
     df["BB_lower"] = bb.bollinger_lband()
     df["BB_mid"]   = bb.bollinger_mavg()
-    df["BB_pct"]   = bb.bollinger_pband()   # 0~1：0=下軌、1=上軌
+    df["BB_pct"]   = bb.bollinger_pband()
 
-    # ATR
-    df["ATR"]    = ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range()
+    df["ATR"] = ta.volatility.AverageTrueRange(high, low, close, window=14).average_true_range()
+    df["OBV"] = ta.volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()
 
-    # OBV（能量潮）
-    df["OBV"]    = ta.volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()
-
-    # 對數報酬 & 波動
     df["RET"]     = np.log(close).diff()
     df["SIGMA20"] = df["RET"].rolling(20).std()
 
@@ -104,44 +102,89 @@ def future_dates(df: pd.DataFrame, horizon: int) -> pd.DatetimeIndex:
 
 
 # ─────────────────────────────────────────────
-# 蒙地卡羅模擬（加入 MACD + 布林 + KD 調整 drift）
+# 取得 GARCH 波動率序列（若無 arch 套件則退回 SIGMA20）
 # ─────────────────────────────────────────────
-def simulate_paths(df, fdates, n_paths, mean_revert, noise_mult) -> np.ndarray:
+def get_sigma_forecast(df: pd.DataFrame, T: int) -> np.ndarray:
+    if HAS_ARCH:
+        try:
+            ret_pct = df["RET"].dropna() * 100
+            res     = arch_model(ret_pct, vol='Garch', p=1, q=1, dist='t').fit(disp='off')
+            fc      = res.forecast(horizon=T)
+            sigma_t = np.sqrt(fc.variance.values[-1]) / 100
+            return np.clip(sigma_t, 1e-4, None)
+        except Exception:
+            pass
+    base_sigma = float(df["SIGMA20"].iloc[-1])
+    if not np.isfinite(base_sigma) or base_sigma <= 0:
+        base_sigma = max(float(df["RET"].tail(60).std()), 0.01)
+    return np.full(T, base_sigma)
+
+
+# ─────────────────────────────────────────────
+# 蒙地卡羅模擬
+#   ✅ Student-t 肥尾噪音
+#   ✅ GARCH(1,1) 動態波動率（可選）
+#   ✅ EWMA drift（近期加權）
+#   ✅ 動態偏移縮放（相對 sigma）
+#   ✅ OBV 斜率偏移
+#   ✅ Antithetic Variates 降低模擬誤差
+# ─────────────────────────────────────────────
+def simulate_paths(df, fdates, n_paths, mean_revert, noise_mult, atr_mult) -> np.ndarray:
     close  = df["Close"].astype(float)
     ret    = df["RET"].astype(float)
     last_p = float(close.iloc[-1])
-    drift  = float(ret.tail(10).mean())
-    sigma  = float(df["SIGMA20"].iloc[-1])
-    if not np.isfinite(sigma) or sigma <= 0:
-        sigma = max(float(ret.tail(60).std()), 0.01)
     ma20   = float(df["MA20"].iloc[-1])
+    T      = len(fdates)
 
-    # ── MACD 調整：MACD > signal 偏多，調高 drift ──
+    # ── EWMA drift（近期加權更敏感）──
+    drift  = float(ret.ewm(span=10, adjust=False).mean().iloc[-1])
+
+    # ── 動態波動率（GARCH 或 rolling std）──
+    sigma_t = get_sigma_forecast(df, T) * noise_mult
+
+    # ── 動態偏移單位 = 基準 sigma 的 15% ──
+    sigma_base = float(df["SIGMA20"].iloc[-1])
+    bias_unit  = sigma_base * 0.15
+
     macd_val  = float(df["MACD"].iloc[-1])
     macd_sig  = float(df["MACD_signal"].iloc[-1])
-    macd_bias = 0.001 if macd_val > macd_sig else -0.001
-
-    # ── 布林通道位置調整：靠近上軌偏空、下軌偏多 ──
-    bb_pct    = float(df["BB_pct"].iloc[-1])   # 0~1
-    bb_bias   = -0.001 if bb_pct > 0.85 else (0.001 if bb_pct < 0.15 else 0.0)
-
-    # ── KD 調整：K<20 偏多、K>80 偏空 ──
+    bb_pct    = float(df["BB_pct"].iloc[-1])
     k_val     = float(df["K"].iloc[-1])
-    kd_bias   = 0.001 if k_val < 20 else (-0.001 if k_val > 80 else 0.0)
 
-    # 合併調整後的 drift
-    adj_drift = drift + macd_bias + bb_bias + kd_bias
+    macd_bias = bias_unit  if macd_val > macd_sig  else -bias_unit
+    bb_bias   = -bias_unit if bb_pct > 0.85        else (bias_unit if bb_pct < 0.15 else 0.0)
+    kd_bias   = bias_unit  if k_val < 20           else (-bias_unit if k_val > 80   else 0.0)
 
-    T      = len(fdates)
-    rng    = np.random.default_rng(42)
-    eps    = rng.normal(0, sigma * noise_mult, size=(n_paths, T))
+    # ── OBV 斜率偏移（5日）──
+    obv_slope = float(df["OBV"].tail(5).diff().mean())
+    obv_norm  = obv_slope / (abs(obv_slope) + 1e-9)
+    obv_bias  = obv_norm * bias_unit * 0.5
+
+    adj_drift = drift + macd_bias + bb_bias + kd_bias + obv_bias
+
+    # ── 擬合 t 分布自由度 ──
+    ret_clean = ret.dropna().values
+    try:
+        df_t, _, scale_t = t_dist.fit(ret_clean, floc=0)
+        df_t = max(df_t, 2.5)   # 最低自由度 2.5，確保有限方差
+    except Exception:
+        df_t, scale_t = 5.0, sigma_base
+
+    # ── Antithetic Variates：前半路徑 + 鏡像後半 ──
+    half = n_paths // 2
+    rng  = np.random.default_rng(42)
+
     paths  = np.zeros((n_paths, T))
     prices = np.full(n_paths, last_p)
 
     for t in range(T):
-        mr     = -mean_revert * ((prices - ma20) / max(ma20, 1e-9)) / max(T, 1)
-        prices = prices * np.exp(adj_drift + mr + eps[:, t])
+        raw_half = t_dist.rvs(df=df_t, loc=0, scale=scale_t * sigma_t[t],
+                              size=half, random_state=rng.integers(1e9))
+        eps   = np.concatenate([raw_half, -raw_half])
+        mr    = -mean_revert * ((prices - ma20) / max(ma20, 1e-9)) / max(T, 1)
+        prices = prices * np.exp(adj_drift + mr + eps)
         paths[:, t] = prices
+
     return paths
 
 
@@ -161,6 +204,7 @@ def find_turning_points(med: np.ndarray):
     peak_idx   = int(s.iloc[peaks].idxmax())   if peaks   else None
     trend      = float(s.iloc[-1] - s.iloc[0])
     std_s      = float(np.nanstd(s.values))
+    trend_text = ""
     if valley_idx is None and peak_idx is None:
         if abs(trend) < max(1e-9, std_s * 0.2):
             trend_text = "這段看起來大多是『來回晃』，沒有很明顯的低點或高點。"
@@ -168,15 +212,13 @@ def find_turning_points(med: np.ndarray):
             trend_text = "這段看起來是『慢慢往上』，沒有明顯轉彎低點。"
         else:
             trend_text = "這段看起來是『慢慢往下』，沒有明顯轉彎高點。"
-    else:
-        trend_text = ""
     return valley_idx, peak_idx, trend_text
 
 
 # ─────────────────────────────────────────────
-# 產生報告（加入 MACD、KD、布林 多空訊號）
+# 產生報告（加入 5%/95% 極端情境）
 # ─────────────────────────────────────────────
-def make_report(df, fdates, paths, capital, risk_pct):
+def make_report(df, fdates, paths, capital, risk_pct, atr_mult):
     last_close = float(df["Close"].iloc[-1])
     atr        = float(df["ATR"].iloc[-1])
     rsi        = float(df["RSI"].iloc[-1])
@@ -188,12 +230,16 @@ def make_report(df, fdates, paths, capital, risk_pct):
     bb_upper   = float(df["BB_upper"].iloc[-1])
     bb_lower   = float(df["BB_lower"].iloc[-1])
 
-    med        = np.median(paths, axis=0)
-    p20        = np.percentile(paths, 20, axis=0)
-    p80        = np.percentile(paths, 80, axis=0)
+    med  = np.median(paths, axis=0)
+    p5   = np.percentile(paths,  5, axis=0)
+    p20  = np.percentile(paths, 20, axis=0)
+    p80  = np.percentile(paths, 80, axis=0)
+    p95  = np.percentile(paths, 95, axis=0)
+
     prev       = np.concatenate([np.full((paths.shape[0], 1), last_close), paths[:, :-1]], axis=1)
     up_prob    = (paths > prev).mean(axis=0) * 100.0
-    stop_price = last_close - 2.5 * atr
+
+    stop_price = last_close - atr_mult * atr
     hit_stop_p = (paths <= stop_price).mean(axis=0) * 100.0
 
     valley_idx, peak_idx, trend_text = find_turning_points(med)
@@ -202,7 +248,7 @@ def make_report(df, fdates, paths, capital, risk_pct):
     buy_action = "建議**分批小量買**（不要一次全買）" if buy_day  else "沒有明顯低點，建議**觀望或少量分批**"
     sell_action= "建議**先賣一部分收錢**"             if sell_day else "沒有明顯高點，用**停損線保護**就好"
 
-    first_hit    = np.full(paths.shape[0], -1, dtype=int)
+    first_hit = np.full(paths.shape[0], -1, dtype=int)
     for i in range(paths.shape[0]):
         hits = np.where(paths[i] <= stop_price)[0]
         if hits.size > 0:
@@ -218,8 +264,8 @@ def make_report(df, fdates, paths, capital, risk_pct):
     per_share_risk = max(last_close - stop_price, 1e-6)
     shares         = int(risk_money // per_share_risk)
 
-    # ── 多空訊號評分（-3 到 +3）──
-    score = 0
+    # ── 多空訊號評分（加權：MACD 權重 x2）──
+    score   = 0
     signals = []
     if rsi < 35:
         score += 1; signals.append("🟢 RSI 超賣（有機會反彈）")
@@ -228,10 +274,11 @@ def make_report(df, fdates, paths, capital, risk_pct):
     else:
         signals.append("🟡 RSI 中性")
 
+    # MACD 權重 x2
     if macd_val > macd_sig:
-        score += 1; signals.append("🟢 MACD 黃金交叉（偏多）")
+        score += 2; signals.append("🟢 MACD 黃金交叉（偏多，權重x2）")
     else:
-        score -= 1; signals.append("🔴 MACD 死亡交叉（偏空）")
+        score -= 2; signals.append("🔴 MACD 死亡交叉（偏空，權重x2）")
 
     if k_val < 20:
         score += 1; signals.append("🟢 KD 超賣（K<20，偏多）")
@@ -247,6 +294,7 @@ def make_report(df, fdates, paths, capital, risk_pct):
     else:
         signals.append("🟡 布林通道中間")
 
+    # 評分範圍 -5 到 +5（MACD x2）
     if score >= 2:
         mood_emoji  = "🟢"; action_line = f"多指標偏多，**最多買 {shares:,} 股**（仍要設停損）"
     elif score <= -2:
@@ -257,7 +305,7 @@ def make_report(df, fdates, paths, capital, risk_pct):
     else:
         mood_emoji  = "🟡"; action_line = f"訊號混雜，**最多買 {shares:,} 股**（謹慎操作）"
 
-    mood  = (
+    mood = (
         "多指標同時偏多，反彈機率較高。" if score >= 2 else
         "多指標同時偏空，下跌風險較高。" if score <= -2 else
         "指標訊號混雜，方向不明，來回晃的機率高。"
@@ -276,20 +324,22 @@ def make_report(df, fdates, paths, capital, risk_pct):
         "signals": signals, "score": score,
     }
     table = pd.DataFrame({
-        "日期":             [d.date() for d in fdates],
-        "可能價格(中間值)": np.round(med, 2),
-        "可能範圍_低(20%)": np.round(p20, 2),
-        "可能範圍_高(80%)": np.round(p80, 2),
-        "上漲機率(%)":      np.round(up_prob, 1),
-        "碰到停損機率(%)":  np.round(hit_stop_p, 1),
+        "日期":              [d.date() for d in fdates],
+        "可能價格(中間值)":  np.round(med, 2),
+        "極端最低(5%)":      np.round(p5,  2),
+        "可能範圍_低(20%)":  np.round(p20, 2),
+        "可能範圍_高(80%)":  np.round(p80, 2),
+        "極端最高(95%)":     np.round(p95, 2),
+        "上漲機率(%)":       np.round(up_prob, 1),
+        "碰到停損機率(%)":   np.round(hit_stop_p, 1),
     })
-    return sd, table, stop_price, med, p20, p80
+    return sd, table, stop_price, med, p20, p80, p5, p95
 
 
 # ─────────────────────────────────────────────
-# 歷史走勢圖（加布林通道 + MACD + 成交量 + OBV）
+# 歷史走勢圖
 # ─────────────────────────────────────────────
-def build_main_chart(df, fdates, med, p20, p80, stop_price):
+def build_main_chart(df, fdates, med, p20, p80, p5, p95, stop_price):
     hist       = df.tail(80).copy()
     hist.index = pd.to_datetime(hist.index).tz_localize(None)
     fdates_ts  = [pd.Timestamp(d) for d in fdates]
@@ -298,10 +348,10 @@ def build_main_chart(df, fdates, med, p20, p80, stop_price):
         rows=4, cols=1, shared_xaxes=True,
         row_heights=[0.45, 0.2, 0.2, 0.15],
         vertical_spacing=0.04,
-        subplot_titles=("📈 股價 + 布林通道 + 預測", "MACD", "KD 指標", "成交量 + OBV")
+        subplot_titles=("📈 股價 + 布林通道 + 預測（含5%/95%極端區間）", "MACD", "KD 指標", "成交量")
     )
 
-    # ── Row 1：股價 + 布林 + MA + 預測 ──
+    # ── Row 1：股價 + 布林 + MA + 預測（雙層區間）──
     fig.add_trace(go.Scatter(x=hist.index, y=hist["BB_upper"],
         line=dict(color="rgba(150,150,255,0.4)", width=1, dash="dot"),
         name="布林上軌", showlegend=True), row=1, col=1)
@@ -315,16 +365,27 @@ def build_main_chart(df, fdates, med, p20, p80, stop_price):
         name="MA20", line=dict(color="#FFA500", width=1.2, dash="dot")), row=1, col=1)
     fig.add_trace(go.Scatter(x=hist.index, y=hist["MA60"],
         name="MA60", line=dict(color="#9B59B6", width=1.2, dash="dot")), row=1, col=1)
+
+    # 外層 5%~95% 極端區間（淺色）
+    fig.add_trace(go.Scatter(
+        x=fdates_ts + fdates_ts[::-1],
+        y=list(p95) + list(p5[::-1]),
+        fill="toself", fillcolor="rgba(100,200,100,0.06)",
+        line=dict(color="rgba(0,0,0,0)"),
+        name="極端區間(5~95%)", hoverinfo="skip"), row=1, col=1)
+
+    # 內層 20%~80% 主要區間（深色）
     fig.add_trace(go.Scatter(
         x=fdates_ts + fdates_ts[::-1],
         y=list(p80) + list(p20[::-1]),
-        fill="toself", fillcolor="rgba(100,200,100,0.15)",
+        fill="toself", fillcolor="rgba(100,200,100,0.18)",
         line=dict(color="rgba(0,0,0,0)"),
-        name="預測區間", hoverinfo="skip"), row=1, col=1)
+        name="主要區間(20~80%)", hoverinfo="skip"), row=1, col=1)
+
     fig.add_trace(go.Scatter(x=fdates_ts, y=med,
         name="預測中間值", line=dict(color="#27AE60", width=2, dash="dash")), row=1, col=1)
     fig.add_trace(go.Scatter(x=fdates_ts, y=[stop_price]*len(fdates_ts),
-        name=f"停損線", line=dict(color="#E74C3C", width=1.5, dash="longdash")), row=1, col=1)
+        name="停損線", line=dict(color="#E74C3C", width=1.5, dash="longdash")), row=1, col=1)
 
     # ── Row 2：MACD ──
     colors_hist = ["#27AE60" if v >= 0 else "#E74C3C" for v in hist["MACD_hist"]]
@@ -344,15 +405,14 @@ def build_main_chart(df, fdates, med, p20, p80, stop_price):
     fig.add_hline(y=80, line_dash="dash", line_color="rgba(231,76,60,0.4)",  row=3, col=1)
     fig.add_hline(y=20, line_dash="dash", line_color="rgba(39,174,96,0.4)",  row=3, col=1)
 
-    # ── Row 4：成交量（bar）+ OBV（line）──
+    # ── Row 4：成交量 ──
     vol_colors = ["#27AE60" if c >= o else "#E74C3C"
                   for c, o in zip(hist["Close"], hist["Open"])]
     fig.add_trace(go.Bar(x=hist.index, y=hist["Volume"],
-        marker_color=vol_colors, name="成交量", showlegend=True,
-        yaxis="y4"), row=4, col=1)
+        marker_color=vol_colors, name="成交量"), row=4, col=1)
 
     fig.update_layout(
-        height=780, template="plotly_dark",
+        height=800, template="plotly_dark",
         legend=dict(orientation="h", y=-0.06),
         margin=dict(l=40, r=20, t=45, b=20),
         hovermode="x unified"
@@ -361,15 +421,17 @@ def build_main_chart(df, fdates, med, p20, p80, stop_price):
 
 
 # ─────────────────────────────────────────────
-# 每日預測視覺化圖
+# 每日預測視覺化圖（含 5%/95%）
 # ─────────────────────────────────────────────
 def build_forecast_chart(table):
-    dates      = [str(d) for d in table["日期"].values]
-    med_vals   = table["可能價格(中間值)"].values
-    p20_vals   = table["可能範圍_低(20%)"].values
-    p80_vals   = table["可能範圍_高(80%)"].values
-    up_vals    = table["上漲機率(%)"].values
-    stop_vals  = table["碰到停損機率(%)"].values
+    dates     = [str(d) for d in table["日期"].values]
+    med_vals  = table["可能價格(中間值)"].values
+    p5_vals   = table["極端最低(5%)"].values
+    p20_vals  = table["可能範圍_低(20%)"].values
+    p80_vals  = table["可能範圍_高(80%)"].values
+    p95_vals  = table["極端最高(95%)"].values
+    up_vals   = table["上漲機率(%)"].values
+    stop_vals = table["碰到停損機率(%)"].values
 
     bar_colors  = ["#27AE60" if v >= 55 else "#F39C12" if v >= 45 else "#E74C3C" for v in up_vals]
     stop_colors = ["#E74C3C" if v >= 10 else "#F39C12" if v >= 3  else "#27AE60" for v in stop_vals]
@@ -378,38 +440,57 @@ def build_forecast_chart(table):
         rows=3, cols=1, shared_xaxes=True,
         row_heights=[0.5, 0.25, 0.25],
         vertical_spacing=0.06,
-        subplot_titles=("💰 預測價格區間", "⬆️ 明天漲機率 (%)", "🛑 碰到停損機率 (%)")
+        subplot_titles=("💰 預測價格區間（含極端5%/95%）", "⬆️ 明天漲機率 (%)", "🛑 碰到停損機率 (%)")
     )
+
+    # 外層極端區間
+    fig.add_trace(go.Scatter(
+        x=dates + dates[::-1], y=list(p95_vals) + list(p5_vals[::-1]),
+        fill="toself", fillcolor="rgba(100,180,255,0.08)",
+        line=dict(color="rgba(0,0,0,0)"),
+        name="極端區間(5~95%)", hoverinfo="skip"), row=1, col=1)
+
+    # 內層主要區間
     fig.add_trace(go.Scatter(
         x=dates + dates[::-1], y=list(p80_vals) + list(p20_vals[::-1]),
         fill="toself", fillcolor="rgba(100,180,255,0.18)",
         line=dict(color="rgba(0,0,0,0)"),
-        name="價格區間", hoverinfo="skip"), row=1, col=1)
+        name="主要區間(20~80%)", hoverinfo="skip"), row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=dates, y=p95_vals, mode="lines",
+        line=dict(color="rgba(100,180,255,0.35)", width=1, dash="dot"),
+        name="極端最高(95%)"), row=1, col=1)
     fig.add_trace(go.Scatter(x=dates, y=p80_vals, mode="lines",
-        line=dict(color="rgba(100,180,255,0.5)", width=1, dash="dot"),
+        line=dict(color="rgba(100,180,255,0.6)", width=1, dash="dot"),
         name="最好情況(80%)"), row=1, col=1)
     fig.add_trace(go.Scatter(x=dates, y=p20_vals, mode="lines",
-        line=dict(color="rgba(255,120,120,0.5)", width=1, dash="dot"),
+        line=dict(color="rgba(255,120,120,0.6)", width=1, dash="dot"),
         name="最壞情況(20%)"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=dates, y=p5_vals, mode="lines",
+        line=dict(color="rgba(255,80,80,0.35)", width=1, dash="dot"),
+        name="極端最低(5%)"), row=1, col=1)
     fig.add_trace(go.Scatter(x=dates, y=med_vals, mode="lines+markers",
         line=dict(color="#F1C40F", width=2.5),
         marker=dict(size=7, color="#F1C40F"),
         name="預測中間值",
         hovertemplate="<b>%{x}</b><br>預測價：%{y:,.2f}<extra></extra>"), row=1, col=1)
+
     fig.add_trace(go.Bar(x=dates, y=up_vals, marker_color=bar_colors,
         name="上漲機率",
         text=[f"{v:.1f}%" for v in up_vals], textposition="outside",
         hovertemplate="<b>%{x}</b><br>上漲機率：%{y:.1f}%<extra></extra>"), row=2, col=1)
     fig.add_hline(y=55, line_dash="dash", line_color="rgba(39,174,96,0.5)",  row=2, col=1)
     fig.add_hline(y=45, line_dash="dash", line_color="rgba(231,76,60,0.5)",  row=2, col=1)
+
     fig.add_trace(go.Bar(x=dates, y=stop_vals, marker_color=stop_colors,
         name="碰停損機率",
         text=[f"{v:.1f}%" for v in stop_vals], textposition="outside",
         hovertemplate="<b>%{x}</b><br>碰停損機率：%{y:.1f}%<extra></extra>"), row=3, col=1)
     fig.add_hline(y=10, line_dash="dash", line_color="rgba(231,76,60,0.5)",  row=3, col=1)
     fig.add_hline(y=3,  line_dash="dash", line_color="rgba(243,156,18,0.5)", row=3, col=1)
+
     fig.update_layout(
-        height=680, template="plotly_dark",
+        height=700, template="plotly_dark",
         legend=dict(orientation="h", y=-0.06, x=0),
         margin=dict(l=40, r=20, t=45, b=20),
         hovermode="x unified", bargap=0.35,
@@ -420,9 +501,14 @@ def build_forecast_chart(table):
 # ─────────────────────────────────────────────
 # Streamlit UI
 # ─────────────────────────────────────────────
-st.set_page_config(page_title="📘 股票助手（完整版）", layout="wide", page_icon="📘")
+st.set_page_config(page_title="📘 股票助手（精準版）", layout="wide", page_icon="📘")
 st.title("📘 股票助手｜低點 / 高點預測 + 多指標風控")
 st.caption("👆 看三件事：**要不要買** → **低點日怎麼買** → **高點日怎麼賣**")
+
+if HAS_ARCH:
+    st.info("⚡ 已啟用 GARCH(1,1) 動態波動率模型（更精準）")
+else:
+    st.warning("⚠️ 未安裝 `arch` 套件，使用 rolling std 替代。安裝：`pip install arch`")
 
 with st.sidebar:
     st.header("⚙️ 設定")
@@ -436,8 +522,16 @@ with st.sidebar:
     sim_paths_n   = st.slider("模擬條數（越多越穩）", 200, 1200, SIM_PATHS_DEFAULT, 100)
     mean_revert   = st.slider("均值回歸強度", 0.0, 0.6, 0.25, 0.05)
     noise_mult    = st.slider("波動倍數", 0.5, 2.0, 1.0, 0.1)
+    atr_mult      = st.slider("停損 ATR 倍數", 1.5, 3.5, 2.5, 0.5,
+                               help="停損線 = 現價 - N × ATR；越大停損空間越寬")
 
-run_btn = st.button("🚀 開始分析", type="primary", use_container_width=True)
+col_run, col_reset = st.columns([3, 1])
+with col_run:
+    run_btn = st.button("🚀 開始分析", type="primary", use_container_width=True)
+with col_reset:
+    if st.button("🔄 清除快取", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
 if run_btn:
     with st.spinner("📡 抓取資料中（自動偵測上市/上櫃）..."):
@@ -455,34 +549,36 @@ if run_btn:
         st.stop()
 
     fdates = future_dates(df, horizon=forecast_days)
-    with st.spinner("🎲 蒙地卡羅模擬中（已加入 MACD/KD/布林 調整）..."):
-        paths = simulate_paths(df, fdates, sim_paths_n, mean_revert, noise_mult)
 
-    sd, table, stop_price, med, p20, p80 = make_report(df, fdates, paths, capital, risk_pct)
+    with st.spinner("🎲 蒙地卡羅模擬中（t分布 + GARCH + Antithetic Variates）..."):
+        paths = simulate_paths(df, fdates, sim_paths_n, mean_revert, noise_mult, atr_mult)
+
+    sd, table, stop_price, med, p20, p80, p5, p95 = make_report(
+        df, fdates, paths, capital, risk_pct, atr_mult)
 
     # ── 指標卡片（8格）──
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("現價",        f"{sd['last_close']:.2f}")
-    c2.metric("RSI(14)",     f"{sd['rsi']:.1f}",
+    c1.metric("現價",    f"{sd['last_close']:.2f}")
+    c2.metric("RSI(14)", f"{sd['rsi']:.1f}",
               delta="超買⚠️" if sd['rsi'] > 65 else ("超賣💡" if sd['rsi'] < 35 else "中性"))
-    c3.metric("MACD",        f"{sd['macd_val']:.3f}",
+    c3.metric("MACD",    f"{sd['macd_val']:.3f}",
               delta="黃金交叉🟢" if sd['macd_val'] > sd['macd_sig'] else "死亡交叉🔴")
-    c4.metric("ATR(14)",     f"{sd['atr']:.2f}")
+    c4.metric("ATR(14)", f"{sd['atr']:.2f}")
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("停損線",      f"{stop_price:.2f}",
+    c5.metric("停損線", f"{stop_price:.2f}",
               delta=f"-{(sd['last_close'] - stop_price) / sd['last_close'] * 100:.1f}%",
               delta_color="inverse")
-    c6.metric("K值",         f"{sd['k_val']:.1f}",
+    c6.metric("K值", f"{sd['k_val']:.1f}",
               delta="超賣💡" if sd['k_val'] < 20 else ("超買⚠️" if sd['k_val'] > 80 else "中性"))
-    c7.metric("D值",         f"{sd['d_val']:.1f}")
-    c8.metric("布林位置",    f"{sd['bb_pct']*100:.0f}%",
+    c7.metric("D值", f"{sd['d_val']:.1f}")
+    c8.metric("布林位置", f"{sd['bb_pct']*100:.0f}%",
               delta="靠上軌⚠️" if sd['bb_pct'] > 0.8 else ("靠下軌💡" if sd['bb_pct'] < 0.2 else "中間"))
 
     st.divider()
 
-    # ── 多空訊號評分 ──
-    st.subheader(f"{sd['mood_emoji']} 多指標綜合訊號（評分：{sd['score']:+d} / +4 到 -4）")
+    # ── 多空訊號評分（MACD 加權 x2，範圍 -5 到 +5）──
+    st.subheader(f"{sd['mood_emoji']} 多指標綜合訊號（評分：{sd['score']:+d} / -5 到 +5，MACD 加權）")
     st.info(f"{sd['mood']}\n\n**操作建議：** {sd['action_line']}")
     sig_cols = st.columns(len(sd['signals']))
     for col, sig in zip(sig_cols, sd['signals']):
@@ -510,15 +606,16 @@ if run_btn:
 
     st.divider()
 
-    # ── 歷史走勢圖（布林 + MACD + KD + 成交量）──
-    st.subheader("📈 歷史走勢（布林通道 / MACD / KD / 成交量）")
-    st.plotly_chart(build_main_chart(df, fdates, med, p20, p80, stop_price),
-                    use_container_width=True)
+    # ── 歷史走勢圖 ──
+    st.subheader("📈 歷史走勢（布林通道 / MACD / KD / 成交量）+ 雙層預測區間")
+    st.plotly_chart(
+        build_main_chart(df, fdates, med, p20, p80, p5, p95, stop_price),
+        use_container_width=True)
 
     st.divider()
 
     # ── 每日預測視覺化 ──
-    st.subheader("📊 每日預測（視覺化）")
+    st.subheader("📊 每日預測（視覺化，含極端 5% / 95%）")
     st.plotly_chart(build_forecast_chart(table), use_container_width=True)
 
     leg1, leg2 = st.columns(2)
@@ -528,5 +625,10 @@ if run_btn:
     with leg2:
         st.markdown("**🛑 碰停損機率圖例**")
         st.markdown("✅ **<3%** 安全　⚠️ **3~10%** 偏高　🚨 **≥10%** 危險")
+
+    # ── 詳細預測數據表 ──
+    st.divider()
+    st.subheader("📋 每日預測數據（含極端情境）")
+    st.dataframe(table, use_container_width=True, hide_index=True)
 
     st.caption("⚠️ 免責聲明：此工具僅供輔助思考，不構成投資建議，請自行評估風險。")
