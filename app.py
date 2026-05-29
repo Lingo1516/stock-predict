@@ -13,6 +13,11 @@ from scipy.stats import t as t_dist
 warnings.filterwarnings("ignore")
 TZ_TW = pytz.timezone("Asia/Taipei")
 
+# 台灣股市顏色：漲=紅 跌=綠
+RED   = "#E74C3C"
+GREEN = "#2ECC71"
+GOLD  = "#F39C12"
+
 # ══════════════════════════════════════════════════════
 # 1. 資料下載
 # ══════════════════════════════════════════════════════
@@ -52,8 +57,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["RSI"]   = ta.momentum.RSIIndicator(close, 14).rsi()
 
     m = ta.trend.MACD(close, 26, 12, 9)
-    df["MACD"] = m.macd()
-    df["MACD_sig"] = m.macd_signal()
+    df["MACD"]      = m.macd()
+    df["MACD_sig"]  = m.macd_signal()
     df["MACD_hist"] = m.macd_diff()
 
     s = ta.momentum.StochasticOscillator(high, low, close, 9, 3)
@@ -66,8 +71,8 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_mid"] = bb.bollinger_mavg()
     df["BB_pct"] = bb.bollinger_pband()
 
-    df["ATR"] = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
-    df["OBV"] = ta.volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()
+    df["ATR"]     = ta.volatility.AverageTrueRange(high, low, close, 14).average_true_range()
+    df["OBV"]     = ta.volume.OnBalanceVolumeIndicator(close, vol).on_balance_volume()
     df["RET"]     = np.log(close).diff()
     df["SIGMA20"] = df["RET"].rolling(20).std()
     return df.dropna().copy()
@@ -163,7 +168,7 @@ def simulate(df, n_paths: int, T: int,
 
 
 # ══════════════════════════════════════════════════════
-# 6. 次日 + 後三日預測
+# 6. 次日 + 後三日預測（漲紅跌綠）
 # ══════════════════════════════════════════════════════
 def short_forecast(last_close: float, fdates, paths: np.ndarray) -> list:
     out = []
@@ -177,9 +182,9 @@ def short_forecast(last_close: float, fdates, paths: np.ndarray) -> list:
         ref  = last_close if i==0 else float(np.median(paths[:,i-1]))
         chg  = (med - ref) / ref * 100
 
-        if prob >= 55:   direc, col = "⬆️ 偏漲", "#2ECC71"
-        elif prob <= 45: direc, col = "⬇️ 偏跌", "#E74C3C"
-        else:            direc, col = "↔️ 盤整", "#F39C12"
+        if prob >= 55:   direc, col = "⬆️ 偏漲", RED    # 漲 = 紅
+        elif prob <= 45: direc, col = "⬇️ 偏跌", GREEN  # 跌 = 綠
+        else:            direc, col = "↔️ 盤整", GOLD
 
         out.append({
             "label": "次日" if i==0 else f"第{i+1}日",
@@ -236,7 +241,8 @@ def chart_prob(sf: list) -> go.Figure:
                            font=dict(color="white", size=13),
                            xanchor="left", yanchor="middle")
 
-    for xv, lbl, cl in [(45,"45%偏跌","#E74C3C"),(55,"55%偏漲","#2ECC71")]:
+    # 參考線（漲紅跌綠）
+    for xv, lbl, cl in [(45,"45%偏跌", GREEN),(55,"55%偏漲", RED)]:
         fig.add_shape(type="line", x0=xv, x1=xv, y0=-0.55, y1=3.55,
                       line=dict(color=cl, dash="dot", width=1))
         fig.add_annotation(x=xv, y=3.65,
@@ -248,7 +254,8 @@ def chart_prob(sf: list) -> go.Figure:
 
     fig.update_layout(
         height=300, template="plotly_dark",
-        title=dict(text="📊 次日 + 後三日｜上漲機率進度條", font=dict(size=15)),
+        title=dict(text="📊 次日 + 後三日｜上漲機率進度條（台灣：漲紅跌綠）",
+                   font=dict(size=15)),
         xaxis=dict(range=[-18,175], showticklabels=False, showgrid=False, zeroline=False),
         yaxis=dict(range=[-0.65,4.1], showticklabels=False, showgrid=False, zeroline=False),
         margin=dict(l=70, r=20, t=55, b=10),
@@ -270,12 +277,12 @@ def chart_trend(sf: list, last_close: float) -> go.Figure:
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x+x[::-1], y=yp90+yp10[::-1],
-        fill="toself", fillcolor="rgba(100,180,255,0.10)",
+        fill="toself", fillcolor="rgba(200,150,150,0.10)",
         line=dict(color="rgba(0,0,0,0)"), name="10%~90%區間", hoverinfo="skip"))
     fig.add_trace(go.Scatter(x=x, y=yp90, mode="lines",
-        line=dict(color="rgba(100,180,255,0.4)", width=1, dash="dot"), name="90%上限"))
+        line=dict(color=f"rgba(231,76,60,0.4)", width=1, dash="dot"), name="90%上限（偏漲）"))
     fig.add_trace(go.Scatter(x=x, y=yp10, mode="lines",
-        line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dot"), name="10%下限"))
+        line=dict(color=f"rgba(46,204,113,0.4)", width=1, dash="dot"), name="10%下限（偏跌）"))
     fig.add_trace(go.Scatter(x=x, y=ymed,
         mode="lines+markers+text",
         line=dict(color="#F1C40F", width=3),
@@ -300,7 +307,7 @@ def chart_trend(sf: list, last_close: float) -> go.Figure:
 
 
 # ══════════════════════════════════════════════════════
-# 9. 圖三：歷史走勢主圖
+# 9. 圖三：歷史走勢主圖（漲紅跌綠）
 # ══════════════════════════════════════════════════════
 def chart_main(df, fdates, paths, stop_price) -> go.Figure:
     med = np.median(paths, axis=0)
@@ -328,33 +335,35 @@ def chart_main(df, fdates, paths, stop_price) -> go.Figure:
     fig.add_trace(go.Scatter(x=hist.index, y=hist["MA60"],
         name="MA60", line=dict(color="#9B59B6",width=1.2,dash="dot")), row=1,col=1)
     fig.add_trace(go.Scatter(x=fts+fts[::-1], y=list(p95)+list(p5[::-1]),
-        fill="toself", fillcolor="rgba(100,200,100,0.06)",
+        fill="toself", fillcolor="rgba(231,76,60,0.06)",
         line=dict(color="rgba(0,0,0,0)"), name="極端區間", hoverinfo="skip"), row=1,col=1)
     fig.add_trace(go.Scatter(x=fts+fts[::-1], y=list(p80)+list(p20[::-1]),
-        fill="toself", fillcolor="rgba(100,200,100,0.20)",
+        fill="toself", fillcolor="rgba(231,76,60,0.15)",
         line=dict(color="rgba(0,0,0,0)"), name="主要區間", hoverinfo="skip"), row=1,col=1)
     fig.add_trace(go.Scatter(x=fts, y=med,
-        name="預測中間值", line=dict(color="#27AE60",width=2,dash="dash")), row=1,col=1)
+        name="預測中間值", line=dict(color=RED,width=2,dash="dash")), row=1,col=1)
     fig.add_trace(go.Scatter(x=fts, y=[stop_price]*len(fts),
-        name="停損線", line=dict(color="#E74C3C",width=1.5,dash="longdash")), row=1,col=1)
+        name="停損線", line=dict(color=GREEN,width=1.5,dash="longdash")), row=1,col=1)
 
-    ch = ["#27AE60" if v>=0 else "#E74C3C" for v in hist["MACD_hist"]]
+    # MACD 柱：漲紅跌綠
+    ch = [RED if v>=0 else GREEN for v in hist["MACD_hist"]]
     fig.add_trace(go.Bar(x=hist.index, y=hist["MACD_hist"],
         marker_color=ch, showlegend=False), row=2,col=1)
     fig.add_trace(go.Scatter(x=hist.index, y=hist["MACD"],
         line=dict(color="#3498DB",width=1.5), name="MACD"), row=2,col=1)
     fig.add_trace(go.Scatter(x=hist.index, y=hist["MACD_sig"],
-        line=dict(color="#E74C3C",width=1.5), name="Signal"), row=2,col=1)
+        line=dict(color=GOLD,width=1.5), name="Signal"), row=2,col=1)
     fig.add_hline(y=0, line_color="rgba(255,255,255,0.2)", row=2,col=1)
 
     fig.add_trace(go.Scatter(x=hist.index, y=hist["K"],
-        line=dict(color="#F39C12",width=1.5), name="K"), row=3,col=1)
+        line=dict(color=RED,width=1.5), name="K"), row=3,col=1)
     fig.add_trace(go.Scatter(x=hist.index, y=hist["D"],
         line=dict(color="#9B59B6",width=1.5), name="D"), row=3,col=1)
-    fig.add_hline(y=80, line_dash="dash", line_color="rgba(231,76,60,0.4)", row=3,col=1)
-    fig.add_hline(y=20, line_dash="dash", line_color="rgba(39,174,96,0.4)", row=3,col=1)
+    fig.add_hline(y=80, line_dash="dash", line_color=f"rgba(231,76,60,0.4)", row=3,col=1)
+    fig.add_hline(y=20, line_dash="dash", line_color=f"rgba(46,204,113,0.4)", row=3,col=1)
 
-    vc = ["#27AE60" if c>=o else "#E74C3C"
+    # 成交量：漲紅跌綠
+    vc = [RED if c>=o else GREEN
           for c,o in zip(hist["Close"],hist["Open"])]
     fig.add_trace(go.Bar(x=hist.index, y=hist["Volume"],
         marker_color=vc, name="成交量"), row=4,col=1)
@@ -366,7 +375,7 @@ def chart_main(df, fdates, paths, stop_price) -> go.Figure:
 
 
 # ══════════════════════════════════════════════════════
-# 10. 技術面評分
+# 10. 技術面評分（漲紅🔴 跌綠🟢）
 # ══════════════════════════════════════════════════════
 def tech_score(df):
     rsi = float(df["RSI"].iloc[-1])
@@ -376,19 +385,19 @@ def tech_score(df):
     bp  = float(df["BB_pct"].iloc[-1])
     sc, sg = 0, []
 
-    if rsi<35:    sc+=1; sg.append("🟢 RSI超賣")
-    elif rsi>65:  sc-=1; sg.append("🔴 RSI超買")
+    if rsi<35:    sc+=1; sg.append("🔴 RSI超賣（偏漲）")
+    elif rsi>65:  sc-=1; sg.append("🟢 RSI超買（偏跌）")
     else:                sg.append("🟡 RSI中性")
 
-    if mv>ms: sc+=2; sg.append("🟢 MACD黃金交叉(×2)")
-    else:     sc-=2; sg.append("🔴 MACD死亡交叉(×2)")
+    if mv>ms: sc+=2; sg.append("🔴 MACD黃金交叉（偏漲×2）")
+    else:     sc-=2; sg.append("🟢 MACD死亡交叉（偏跌×2）")
 
-    if kv<20:    sc+=1; sg.append("🟢 KD超賣")
-    elif kv>80:  sc-=1; sg.append("🔴 KD超買")
+    if kv<20:    sc+=1; sg.append("🔴 KD超賣（偏漲）")
+    elif kv>80:  sc-=1; sg.append("🟢 KD超買（偏跌）")
     else:               sg.append("🟡 KD中性")
 
-    if bp<0.2:   sc+=1; sg.append("🟢 布林下緣")
-    elif bp>0.8: sc-=1; sg.append("🔴 布林上緣")
+    if bp<0.2:   sc+=1; sg.append("🔴 布林下緣（偏漲）")
+    elif bp>0.8: sc-=1; sg.append("🟢 布林上緣（偏跌）")
     else:               sg.append("🟡 布林中間")
 
     return sc, sg, rsi, mv, ms, kv, bp
@@ -430,7 +439,7 @@ def full_table(last_close, fdates, paths, stop_price) -> pd.DataFrame:
 # ══════════════════════════════════════════════════════
 st.set_page_config(page_title="📘 股票助手", layout="wide", page_icon="📘")
 st.title("📘 股票助手｜次日 + 後三日明確預測")
-st.caption("🎯 ① 次日漲跌機率　② 後三日趨勢　③ 技術面確認")
+st.caption("🎯 ① 次日漲跌機率　② 後三日趨勢　③ 技術面確認　｜　🔴漲 🟢跌（台灣慣例）")
 
 with st.sidebar:
     st.header("⚙️ 設定")
@@ -485,19 +494,19 @@ if run:
     st.markdown("---")
     st.subheader("🎯 次日明確結論")
     t0 = sf[0]
-    a  = "🟢⬆️" if t0["prob"]>=55 else ("🔴⬇️" if t0["prob"]<=45 else "🟡↔️")
+    a  = "🔴⬆️" if t0["prob"]>=55 else ("🟢⬇️" if t0["prob"]<=45 else "🟡↔️")
     c1,c2,c3,c4,c5 = st.columns(5)
     c1.metric("現價",       f"{lc:.2f}")
     c2.metric("次日預測價", f"{t0['med']:.2f}", delta=f"{t0['chg']:+.2f}%")
     c3.metric("上漲機率",   f"{t0['prob']:.1f}%",
-              delta="偏漲✅" if t0["prob"]>=55 else ("偏跌❌" if t0["prob"]<=45 else "盤整⚠️"))
+              delta="偏漲🔴" if t0["prob"]>=55 else ("偏跌🟢" if t0["prob"]<=45 else "盤整🟡"))
     c4.metric("低點(10%)",  f"{t0['p10']:.2f}")
     c5.metric("高點(90%)",  f"{t0['p90']:.2f}")
 
     if t0["prob"]>=55:
-        st.success(f"**{a} 次日偏漲**｜預測 **{t0['med']:.2f}**（{t0['chg']:+.2f}%）　落點 **{t0['p10']:.2f}~{t0['p90']:.2f}**")
+        st.error(  f"**{a} 次日偏漲**｜預測 **{t0['med']:.2f}**（{t0['chg']:+.2f}%）　落點 **{t0['p10']:.2f}~{t0['p90']:.2f}**")
     elif t0["prob"]<=45:
-        st.error(  f"**{a} 次日偏跌**｜預測 **{t0['med']:.2f}**（{t0['chg']:+.2f}%）　落點 **{t0['p10']:.2f}~{t0['p90']:.2f}**")
+        st.success(f"**{a} 次日偏跌**｜預測 **{t0['med']:.2f}**（{t0['chg']:+.2f}%）　落點 **{t0['p10']:.2f}~{t0['p90']:.2f}**")
     else:
         st.warning(f"**{a} 次日盤整**｜預測 **{t0['med']:.2f}**（{t0['chg']:+.2f}%）　落點 **{t0['p10']:.2f}~{t0['p90']:.2f}**")
 
@@ -505,7 +514,7 @@ if run:
     st.markdown("---")
     st.subheader("📊 次日 + 後三日｜上漲機率進度條")
     st.plotly_chart(chart_prob(sf), use_container_width=True)
-    st.caption("長條越長=上漲機率越高　🟢≥55%偏漲　🟡45~55%盤整　🔴≤45%偏跌　虛線=50%基準")
+    st.caption("長條越長=上漲機率越高　🔴≥55%偏漲　🟡45~55%盤整　🟢≤45%偏跌　虛線=50%基準")
 
     # ── 區塊三：趨勢折線 ──
     st.markdown("---")
@@ -517,7 +526,7 @@ if run:
     st.subheader("📋 後三日逐日結論")
     cols = st.columns(3)
     for col, r in zip(cols, sf[1:]):
-        e = "🟢" if r["prob"]>=55 else ("🔴" if r["prob"]<=45 else "🟡")
+        e = "🔴" if r["prob"]>=55 else ("🟢" if r["prob"]<=45 else "🟡")
         col.markdown(f"""
 **{e} {r['label']}　{r['date']}**
 
@@ -535,8 +544,8 @@ if run:
     nd = sum(1 for r in sf if r["prob"]<=45)
     tc = (sf[-1]["med"] - lc) / lc * 100
     st.markdown("---")
-    if nu>=3:   st.success(f"📈 **4日整體偏多**（{nu}/4偏漲）　累計 **{tc:+.2f}%**　{lc:.2f}→{sf[-1]['med']:.2f}")
-    elif nd>=3: st.error(  f"📉 **4日整體偏空**（{nd}/4偏跌）　累計 **{tc:+.2f}%**　{lc:.2f}→{sf[-1]['med']:.2f}")
+    if nu>=3:   st.error(  f"📈 **4日整體偏多**（{nu}/4偏漲）　累計 **{tc:+.2f}%**　{lc:.2f}→{sf[-1]['med']:.2f}")
+    elif nd>=3: st.success(f"📉 **4日整體偏空**（{nd}/4偏跌）　累計 **{tc:+.2f}%**　{lc:.2f}→{sf[-1]['med']:.2f}")
     else:       st.warning(f"↔️ **4日震盪**　累計 **{tc:+.2f}%**　{lc:.2f}→{sf[-1]['med']:.2f}")
 
     # ── 區塊五：技術指標 ──
@@ -546,16 +555,16 @@ if run:
     c1,c2,c3,c4,c5,c6 = st.columns(6)
     c1.metric("現價",    f"{lc:.2f}")
     c2.metric("RSI(14)", f"{rsi:.1f}",
-              delta="超買⚠️" if rsi>65 else ("超賣💡" if rsi<35 else "中性"))
+              delta="超買🟢偏跌" if rsi>65 else ("超賣🔴偏漲" if rsi<35 else "中性"))
     c3.metric("MACD",    f"{mv:.3f}",
-              delta="黃金交叉🟢" if mv>ms else "死亡交叉🔴")
+              delta="黃金交叉🔴偏漲" if mv>ms else "死亡交叉🟢偏跌")
     c4.metric("K值",     f"{kv:.1f}",
-              delta="超賣💡" if kv<20 else ("超買⚠️" if kv>80 else "中性"))
+              delta="超賣🔴偏漲" if kv<20 else ("超買🟢偏跌" if kv>80 else "中性"))
     c5.metric("ATR(14)", f"{atr:.2f}")
     c6.metric("停損線",  f"{stop:.2f}",
               delta=f"-{(lc-stop)/lc*100:.1f}%", delta_color="inverse")
 
-    me = "🟢" if sc>=2 else ("🔴" if sc<=-2 else "🟡")
+    me = "🔴" if sc>=2 else ("🟢" if sc<=-2 else "🟡")
     st.subheader(f"{me} 綜合評分：{sc:+d}（-5 到 +5）")
     scols = st.columns(len(sg))
     for col, s in zip(scols, sg):
@@ -564,9 +573,9 @@ if run:
     rm  = cap * riskp
     psr = max(lc - stop, 1e-6)
     shs = int(rm // psr)
-    if sc>=2:    st.success(f"✅ 偏多 → 最多買 **{shs:,} 股**，停損 **{stop:.2f}**（-{(lc-stop)/lc*100:.1f}%）")
-    elif sc<=-2: st.error("❌ 偏空 → 建議觀望")
-    else:        st.warning(f"⚠️ 混雜 → 最多 **{shs:,} 股**，嚴守停損 **{stop:.2f}**")
+    if sc>=2:    st.error(  f"🔴 偏多 → 最多買 **{shs:,} 股**，停損 **{stop:.2f}**（-{(lc-stop)/lc*100:.1f}%）")
+    elif sc<=-2: st.success("🟢 偏空 → 建議觀望，不要進場")
+    else:        st.warning(f"🟡 混雜 → 最多 **{shs:,} 股**，嚴守停損 **{stop:.2f}**")
 
     # ── 區塊六：歷史走勢 ──
     st.markdown("---")
@@ -579,28 +588,23 @@ if run:
     ft = full_table(lc, fdates, paths, stop)
 
     def cd(v):
-        if "偏漲" in str(v): return "color:#2ECC71;font-weight:bold"
-        if "偏跌" in str(v): return "color:#E74C3C;font-weight:bold"
-        return "color:#F39C12;font-weight:bold"
+        if "偏漲" in str(v): return f"color:{RED};font-weight:bold"
+        if "偏跌" in str(v): return f"color:{GREEN};font-weight:bold"
+        return f"color:{GOLD};font-weight:bold"
 
     def cp(v):
         try:
             f = float(v)
-            if f >= 55: return "background-color:rgba(46,204,113,0.2)"
-            if f <= 45: return "background-color:rgba(231,76,60,0.2)"
+            if f >= 55: return f"background-color:rgba(231,76,60,0.2)"
+            if f <= 45: return f"background-color:rgba(46,204,113,0.2)"
         except Exception:
             pass
         return ""
 
-    # 相容新舊版 pandas：優先用 .map，失敗則用 .applymap
     try:
-        styled = (ft.style
-                  .map(cd, subset=["方向"])
-                  .map(cp, subset=["上漲機率(%)"]))
+        styled = ft.style.map(cd, subset=["方向"]).map(cp, subset=["上漲機率(%)"])
     except AttributeError:
-        styled = (ft.style
-                  .applymap(cd, subset=["方向"])
-                  .applymap(cp, subset=["上漲機率(%)"]))
+        styled = ft.style.applymap(cd, subset=["方向"]).applymap(cp, subset=["上漲機率(%)"])
 
     styled = styled.format({
         "預測股價":    "{:.2f}",
@@ -614,5 +618,5 @@ if run:
     })
 
     st.dataframe(styled, use_container_width=True, hide_index=True)
-    st.markdown("🟢 ≥55% 偏漲　🟡 45~55% 盤整　🔴 ≤45% 偏跌")
+    st.markdown("🔴 ≥55% 偏漲　🟡 45~55% 盤整　🟢 ≤45% 偏跌")
     st.caption("⚠️ 本工具僅供參考，不構成投資建議，請自行評估風險。")
