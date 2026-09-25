@@ -2,7 +2,9 @@ streamlit
 yfinance
 pandas
 numpy
-scikit-learn
+pytz
 ta
 plotly
-matplotlib
+scipy
+scikit-learn
+exchange-calendars
