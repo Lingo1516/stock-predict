@@ -5,6 +5,5 @@ numpy
 pytz
 ta
 plotly
-scipy
 scikit-learn
 exchange-calendars
